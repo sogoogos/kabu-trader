@@ -126,49 +126,59 @@ Recommended: run for 1-2 weeks before committing real money.
 
 ## Strategy: Composite Swing Trading
 
-The system combines 9 technical indicators into a composite score. Each indicator contributes a partial score, and the total determines the signal.
+The system combines 11 indicators into a weighted composite score. Each indicator returns a normalized signal (-1.0 to +1.0), which is multiplied by its **weight** to determine how much influence it has.
 
-### Traditional Indicators
+### Indicators & Weights
 
-| Indicator | Buy Signal | Sell Signal | Max Score |
+| # | Indicator | What it detects | Default Weight |
 |---|---|---|---|
-| SMA Crossover (5/25) | Golden cross / uptrend | Death cross / downtrend | +/-2 |
-| RSI (14) | Oversold (< 30) | Overbought (> 70) | +/-2 |
-| MACD | Bullish crossover | Bearish crossover | +/-2 |
-| Bollinger Bands | Price near/below lower band | Price near/above upper band | +/-2 |
-| Volume | Spike on up day | Spike on down day | +/-1 |
+| 1 | SMA Crossover (5/25) | Golden/death cross, trend direction | 1.5 |
+| 2 | RSI (14) | Oversold / overbought | 1.5 |
+| 3 | MACD | Momentum crossover | 2.0 |
+| 4 | Bollinger Bands | Price extremes | 1.0 |
+| 5 | Volume Spike | Unusual trading activity | 1.0 |
+| 6 | Ichimoku Cloud (一目均衡表) | Trend + support/resistance | 2.5 |
+| 7 | Money Flow Index (MFI) | Institutional buying/selling pressure | 2.0 |
+| 8 | ADX | Trend strength confirmation | 2.0 |
+| 9 | Relative Strength vs Nikkei | Outperformance vs market | 2.5 |
+| 10 | ML Model (Gradient Boosting) | Predicted probability of +3% in 5 days | 3.0 |
+| 11 | LLM News Sentiment (GPT) | News headline analysis | 2.5 |
 
-### Advanced Indicators
+Default weights are based on ML feature importance analysis. Higher weight = more influence on the final score.
 
-| Indicator | What it measures | Why it matters | Max Score |
-|---|---|---|---|
-| Ichimoku Cloud (一目均衡表) | Trend, support/resistance, momentum | Designed for Japanese stocks; used by institutional traders in Japan | +/-2 |
-| Money Flow Index (MFI) | Volume-weighted buying/selling pressure | Detects institutional money flowing in/out — more reliable than RSI alone | +/-2 |
-| ADX | Trend strength (not direction) | Filters out choppy sideways markets where swing trading loses money | +/-1 |
-| Relative Strength vs Nikkei 225 | Stock performance vs the market | A stock rising 2% in a 5% market is actually weak — this catches that | +/-2 |
+### Customizing Weights
 
-### ML Model (10th indicator)
+Edit `indicator_weights` in `config/default.json` to tune. Set a weight to `0` to disable an indicator entirely:
 
-A Gradient Boosting classifier trained on historical data adds a powerful prediction layer:
+```json
+"indicator_weights": {
+  "sma": 1.5,
+  "rsi": 1.5,
+  "macd": 2.0,
+  "bollinger": 1.0,
+  "volume": 1.0,
+  "ichimoku": 2.5,
+  "mfi": 2.0,
+  "adx": 2.0,
+  "relative_strength": 2.5,
+  "ml": 3.0,
+  "sentiment": 2.5
+}
+```
 
-- **35 engineered features**: multi-timeframe returns, momentum, volatility regime, volume patterns, candlestick structure, mean reversion z-scores, and all technical indicator values
-- **Target**: Predicts probability of +3% price increase within 5 trading days
-- **Validation**: Walk-forward evaluation (train on past, test on future) — never sees future data
-- **Score contribution**: Up to +/-3 points based on prediction confidence
+### ML Model (auto-retrains weekly)
 
-Top features by importance: ATR%, volatility, relative strength vs Nikkei, Ichimoku cloud thickness, momentum.
+- **35 engineered features**: multi-timeframe returns, momentum, volatility regime, volume patterns, candlestick structure, mean reversion z-scores
+- **Walk-forward validation**: trains on past, tests on future — never sees future data
+- **Auto-retrains** every Sunday night at 20:00 JST during `monitor`
+- Or manually: `python3 -m kabu_trader.cli train`
 
-Run `python3 -m kabu_trader.cli train` to train the model. Once trained, it is automatically loaded by `scan`, `backtest`, and `monitor`.
+### LLM News Sentiment
 
-### LLM News Sentiment (11th indicator)
+Uses OpenAI (GPT-4o-mini) to analyze news headlines:
 
-Uses OpenAI (GPT-4o-mini) to analyze recent news headlines for each stock:
-
-- Fetches news from Yahoo Finance for each stock
-- Sends headlines to GPT with a structured prompt
-- Returns a sentiment score (-5 to +5) with confidence and reasoning
-- Score contribution: up to +/-3 points based on sentiment strength
-- Results are cached for 1 hour to avoid redundant API calls
+- Refreshes hourly + checks for breaking news every 60 seconds
+- Breaking news triggers instant LINE notification if sentiment score >= 4
 - Cost: ~$0.10-0.30/day for 109 stocks
 
 Configure in `config/default.json`:
@@ -185,9 +195,9 @@ Or use environment variable: `export OPENAI_API_KEY="sk-..."`
 ### Signal Thresholds
 
 - **BUY** when composite score >= 4
-- **STRONG BUY** when composite score >= 7
+- **STRONG BUY** when composite score >= 7 (LINE notification sent)
 - **SELL** when composite score <= -4
-- **STRONG SELL** when composite score <= -7
+- **STRONG SELL** when composite score <= -7 (LINE notification sent)
 
 ## Risk Management
 

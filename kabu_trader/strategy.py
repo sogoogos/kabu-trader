@@ -57,11 +57,33 @@ class SwingCompositeStrategy:
         9. Relative Strength vs Nikkei 225 (outperformance)
     """
 
+    # Default weights based on ML feature importance analysis.
+    # Higher weight = more influence on the final score.
+    # Each indicator's raw score (-1.0 to +1.0) is multiplied by its weight.
+    DEFAULT_WEIGHTS = {
+        "sma": 1.5,
+        "rsi": 1.5,
+        "macd": 2.0,
+        "bollinger": 1.0,
+        "volume": 1.0,
+        "ichimoku": 2.5,
+        "mfi": 2.0,
+        "adx": 2.0,
+        "relative_strength": 2.5,
+        "ml": 3.0,
+        "sentiment": 2.5,
+    }
+
     def __init__(self, params: dict):
         self.params = params
         self.nikkei_df = None
         self.ml_model = None
         self.sentiment_data: dict = {}  # ticker -> sentiment result
+
+        # Merge user-configured weights with defaults
+        user_weights = params.get("indicator_weights", {})
+        self.weights = dict(self.DEFAULT_WEIGHTS)
+        self.weights.update(user_weights)
 
     def set_nikkei_data(self, nikkei_df):
         """Set Nikkei 225 data for relative strength calculation."""
@@ -92,11 +114,13 @@ class SwingCompositeStrategy:
         for i in range(1, len(df)):
             score, reasons = self._score_row(df, i, ticker)
 
-            if abs(score) >= self.params.get("signal_threshold", 3):
+            threshold = self.params.get("signal_threshold", 4)
+            strong_threshold = self.params.get("strong_signal_threshold", 7)
+            if abs(score) >= threshold:
                 if score > 0:
-                    sig = Signal.STRONG_BUY if score >= 5 else Signal.BUY
+                    sig = Signal.STRONG_BUY if score >= strong_threshold else Signal.BUY
                 else:
-                    sig = Signal.STRONG_SELL if score <= -5 else Signal.SELL
+                    sig = Signal.STRONG_SELL if score <= -strong_threshold else Signal.SELL
 
                 signals.append(TradeSignal(
                     ticker=ticker,
@@ -115,13 +139,15 @@ class SwingCompositeStrategy:
         df = self._add_ml_predictions(df)
         score, reasons = self._score_row(df, len(df) - 1, ticker)
 
-        if score >= 5:
+        threshold = self.params.get("signal_threshold", 4)
+        strong_threshold = self.params.get("strong_signal_threshold", 7)
+        if score >= strong_threshold:
             sig = Signal.STRONG_BUY
-        elif score >= self.params.get("signal_threshold", 3):
+        elif score >= threshold:
             sig = Signal.BUY
-        elif score <= -5:
+        elif score <= -strong_threshold:
             sig = Signal.STRONG_SELL
-        elif score <= -self.params.get("signal_threshold", 3):
+        elif score <= -threshold:
             sig = Signal.SELL
         else:
             sig = Signal.HOLD
@@ -138,81 +164,43 @@ class SwingCompositeStrategy:
     def _score_row(self, df: pd.DataFrame, i: int, ticker: str = "") -> Tuple[int, List[str]]:
         """Compute composite score for a single row.
 
+        Each indicator returns a raw score from -1.0 to +1.0.
+        The raw score is multiplied by the indicator's weight.
+        Final score is the sum of all weighted scores, rounded to int.
+
         Returns:
             Tuple of (score, list of reason strings)
         """
-        score = 0
+        weighted_score = 0.0
         reasons = []
 
-        # 1. SMA Crossover
-        sma_score, sma_reason = self._score_sma(df, i)
-        score += sma_score
-        if sma_reason:
-            reasons.append(sma_reason)
+        scorers = [
+            ("sma", self._score_sma, (df, i)),
+            ("rsi", self._score_rsi, (df, i)),
+            ("macd", self._score_macd, (df, i)),
+            ("bollinger", self._score_bollinger, (df, i)),
+            ("volume", self._score_volume, (df, i)),
+            ("ichimoku", self._score_ichimoku, (df, i)),
+            ("mfi", self._score_mfi, (df, i)),
+            ("adx", self._score_adx, (df, i)),
+            ("relative_strength", self._score_relative_strength, (df, i)),
+            ("ml", self._score_ml, (df, i)),
+            ("sentiment", self._score_sentiment, (ticker,)),
+        ]
 
-        # 2. RSI
-        rsi_score, rsi_reason = self._score_rsi(df, i)
-        score += rsi_score
-        if rsi_reason:
-            reasons.append(rsi_reason)
+        for name, scorer, args in scorers:
+            weight = self.weights.get(name, 0)
+            if weight == 0:
+                continue
+            raw_score, reason = scorer(*args)
+            if raw_score != 0 and reason:
+                contribution = raw_score * weight
+                weighted_score += contribution
+                reasons.append(reason)
 
-        # 3. MACD
-        macd_score, macd_reason = self._score_macd(df, i)
-        score += macd_score
-        if macd_reason:
-            reasons.append(macd_reason)
+        return round(weighted_score), reasons
 
-        # 4. Bollinger Bands
-        bb_score, bb_reason = self._score_bollinger(df, i)
-        score += bb_score
-        if bb_reason:
-            reasons.append(bb_reason)
-
-        # 5. Volume confirmation
-        vol_score, vol_reason = self._score_volume(df, i)
-        score += vol_score
-        if vol_reason:
-            reasons.append(vol_reason)
-
-        # 6. Ichimoku Cloud
-        ichi_score, ichi_reason = self._score_ichimoku(df, i)
-        score += ichi_score
-        if ichi_reason:
-            reasons.append(ichi_reason)
-
-        # 7. Money Flow Index
-        mfi_score, mfi_reason = self._score_mfi(df, i)
-        score += mfi_score
-        if mfi_reason:
-            reasons.append(mfi_reason)
-
-        # 8. ADX trend strength (multiplier, not additive)
-        adx_score, adx_reason = self._score_adx(df, i)
-        score += adx_score
-        if adx_reason:
-            reasons.append(adx_reason)
-
-        # 9. Relative Strength vs Nikkei
-        rs_score, rs_reason = self._score_relative_strength(df, i)
-        score += rs_score
-        if rs_reason:
-            reasons.append(rs_reason)
-
-        # 10. ML Model prediction (if available)
-        ml_score, ml_reason = self._score_ml(df, i)
-        score += ml_score
-        if ml_reason:
-            reasons.append(ml_reason)
-
-        # 11. LLM Sentiment (if available, only for latest row)
-        sent_score, sent_reason = self._score_sentiment(ticker)
-        score += sent_score
-        if sent_reason:
-            reasons.append(sent_reason)
-
-        return score, reasons
-
-    def _score_sma(self, df: pd.DataFrame, i: int) -> Tuple[int, str]:
+    def _score_sma(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
         sma_s = df["SMA_short"].iloc[i]
         sma_l = df["SMA_long"].iloc[i]
         sma_s_prev = df["SMA_short"].iloc[i - 1]
@@ -221,22 +209,18 @@ class SwingCompositeStrategy:
         if pd.isna(sma_s) or pd.isna(sma_l) or pd.isna(sma_s_prev) or pd.isna(sma_l_prev):
             return 0, ""
 
-        # Golden cross
         if sma_s_prev <= sma_l_prev and sma_s > sma_l:
-            return 2, f"SMA golden cross ({self.params['sma_short']}/{self.params['sma_long']})"
-        # Death cross
+            return 1.0, f"SMA golden cross ({self.params['sma_short']}/{self.params['sma_long']})"
         if sma_s_prev >= sma_l_prev and sma_s < sma_l:
-            return -2, f"SMA death cross ({self.params['sma_short']}/{self.params['sma_long']})"
-        # Trending up
+            return -1.0, f"SMA death cross ({self.params['sma_short']}/{self.params['sma_long']})"
         if sma_s > sma_l:
-            return 1, "SMA short > long (uptrend)"
-        # Trending down
+            return 0.5, "SMA short > long (uptrend)"
         if sma_s < sma_l:
-            return -1, "SMA short < long (downtrend)"
+            return -0.5, "SMA short < long (downtrend)"
 
         return 0, ""
 
-    def _score_rsi(self, df: pd.DataFrame, i: int) -> Tuple[int, str]:
+    def _score_rsi(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
         rsi_val = df["RSI"].iloc[i]
         if pd.isna(rsi_val):
             return 0, ""
@@ -245,17 +229,17 @@ class SwingCompositeStrategy:
         overbought = self.params["rsi_overbought"]
 
         if rsi_val < oversold:
-            return 2, f"RSI oversold ({rsi_val:.1f})"
+            return 1.0, f"RSI oversold ({rsi_val:.1f})"
         if rsi_val < 40:
-            return 1, f"RSI approaching oversold ({rsi_val:.1f})"
+            return 0.5, f"RSI approaching oversold ({rsi_val:.1f})"
         if rsi_val > overbought:
-            return -2, f"RSI overbought ({rsi_val:.1f})"
+            return -1.0, f"RSI overbought ({rsi_val:.1f})"
         if rsi_val > 60:
-            return -1, f"RSI approaching overbought ({rsi_val:.1f})"
+            return -0.5, f"RSI approaching overbought ({rsi_val:.1f})"
 
         return 0, ""
 
-    def _score_macd(self, df: pd.DataFrame, i: int) -> Tuple[int, str]:
+    def _score_macd(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
         macd_val = df["MACD"].iloc[i]
         sig_val = df["MACD_signal"].iloc[i]
         hist = df["MACD_hist"].iloc[i]
@@ -264,28 +248,25 @@ class SwingCompositeStrategy:
         if pd.isna(macd_val) or pd.isna(sig_val) or pd.isna(hist_prev):
             return 0, ""
 
-        # MACD crossover
         macd_prev = df["MACD"].iloc[i - 1]
         sig_prev = df["MACD_signal"].iloc[i - 1]
 
         if macd_prev <= sig_prev and macd_val > sig_val:
-            return 2, "MACD bullish crossover"
+            return 1.0, "MACD bullish crossover"
         if macd_prev >= sig_prev and macd_val < sig_val:
-            return -2, "MACD bearish crossover"
+            return -1.0, "MACD bearish crossover"
 
-        # Histogram momentum
         if hist > 0 and hist > hist_prev:
-            return 1, "MACD histogram growing (bullish momentum)"
+            return 0.5, "MACD histogram growing (bullish momentum)"
         if hist < 0 and hist < hist_prev:
-            return -1, "MACD histogram declining (bearish momentum)"
+            return -0.5, "MACD histogram declining (bearish momentum)"
 
         return 0, ""
 
-    def _score_bollinger(self, df: pd.DataFrame, i: int) -> Tuple[int, str]:
+    def _score_bollinger(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
         close = df["Close"].iloc[i]
         upper = df["BB_upper"].iloc[i]
         lower = df["BB_lower"].iloc[i]
-        middle = df["BB_middle"].iloc[i]
 
         if pd.isna(upper) or pd.isna(lower):
             return 0, ""
@@ -294,21 +275,20 @@ class SwingCompositeStrategy:
         if bb_width == 0:
             return 0, ""
 
-        # Position within bands (0 = lower, 1 = upper)
         position = (close - lower) / bb_width
 
         if position <= 0.0:
-            return 2, f"Price below lower Bollinger Band (bounce candidate)"
+            return 1.0, "Price below lower Bollinger Band (bounce candidate)"
         if position <= 0.2:
-            return 1, f"Price near lower Bollinger Band ({position:.2f})"
+            return 0.5, f"Price near lower Bollinger Band ({position:.2f})"
         if position >= 1.0:
-            return -2, f"Price above upper Bollinger Band (reversal candidate)"
+            return -1.0, "Price above upper Bollinger Band (reversal candidate)"
         if position >= 0.8:
-            return -1, f"Price near upper Bollinger Band ({position:.2f})"
+            return -0.5, f"Price near upper Bollinger Band ({position:.2f})"
 
         return 0, ""
 
-    def _score_volume(self, df: pd.DataFrame, i: int) -> Tuple[int, str]:
+    def _score_volume(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
         vol_ratio = df["Volume_ratio"].iloc[i]
         if pd.isna(vol_ratio):
             return 0, ""
@@ -318,14 +298,16 @@ class SwingCompositeStrategy:
         prev_close = df["Close"].iloc[i - 1]
 
         if vol_ratio >= threshold:
+            # Scale by how big the spike is (1.5x = 0.5, 3x+ = 1.0)
+            intensity = min(1.0, (vol_ratio - 1) / 2)
             if close > prev_close:
-                return 1, f"Volume spike on up day ({vol_ratio:.1f}x avg)"
+                return intensity, f"Volume spike on up day ({vol_ratio:.1f}x avg)"
             else:
-                return -1, f"Volume spike on down day ({vol_ratio:.1f}x avg)"
+                return -intensity, f"Volume spike on down day ({vol_ratio:.1f}x avg)"
 
         return 0, ""
 
-    def _score_ichimoku(self, df: pd.DataFrame, i: int) -> Tuple[int, str]:
+    def _score_ichimoku(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
         close = df["Close"].iloc[i]
         tenkan = df["Tenkan"].iloc[i]
         kijun = df["Kijun"].iloc[i]
@@ -338,52 +320,49 @@ class SwingCompositeStrategy:
         cloud_top = max(senkou_a, senkou_b)
         cloud_bottom = min(senkou_a, senkou_b)
 
-        score = 0
+        score = 0.0
         reasons = []
 
-        # Price vs cloud
         if close > cloud_top:
-            score += 1
+            score += 0.5
             reasons.append("above cloud")
         elif close < cloud_bottom:
-            score -= 1
+            score -= 0.5
             reasons.append("below cloud")
 
-        # Tenkan/Kijun cross
         if i > 0:
             tenkan_prev = df["Tenkan"].iloc[i - 1]
             kijun_prev = df["Kijun"].iloc[i - 1]
             if not pd.isna(tenkan_prev) and not pd.isna(kijun_prev):
                 if tenkan_prev <= kijun_prev and tenkan > kijun:
-                    score += 1
+                    score += 0.5
                     reasons.append("TK cross bullish")
                 elif tenkan_prev >= kijun_prev and tenkan < kijun:
-                    score -= 1
+                    score -= 0.5
                     reasons.append("TK cross bearish")
 
         if score == 0:
             return 0, ""
         direction = "bullish" if score > 0 else "bearish"
-        return score, f"Ichimoku {direction} ({', '.join(reasons)})"
+        return max(-1.0, min(1.0, score)), f"Ichimoku {direction} ({', '.join(reasons)})"
 
-    def _score_mfi(self, df: pd.DataFrame, i: int) -> Tuple[int, str]:
+    def _score_mfi(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
         mfi_val = df["MFI"].iloc[i]
         if pd.isna(mfi_val):
             return 0, ""
 
-        # MFI is like RSI but volume-weighted — more reliable
         if mfi_val < 20:
-            return 2, f"MFI oversold ({mfi_val:.0f}) — heavy selling exhaustion"
+            return 1.0, f"MFI oversold ({mfi_val:.0f}) — heavy selling exhaustion"
         if mfi_val < 30:
-            return 1, f"MFI low ({mfi_val:.0f}) — selling pressure fading"
+            return 0.5, f"MFI low ({mfi_val:.0f}) — selling pressure fading"
         if mfi_val > 80:
-            return -2, f"MFI overbought ({mfi_val:.0f}) — buying exhaustion"
+            return -1.0, f"MFI overbought ({mfi_val:.0f}) — buying exhaustion"
         if mfi_val > 70:
-            return -1, f"MFI high ({mfi_val:.0f}) — buying pressure peaking"
+            return -0.5, f"MFI high ({mfi_val:.0f}) — buying pressure peaking"
 
         return 0, ""
 
-    def _score_adx(self, df: pd.DataFrame, i: int) -> Tuple[int, str]:
+    def _score_adx(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
         adx_val = df["ADX"].iloc[i]
         plus_di = df["Plus_DI"].iloc[i]
         minus_di = df["Minus_DI"].iloc[i]
@@ -391,34 +370,29 @@ class SwingCompositeStrategy:
         if pd.isna(adx_val) or pd.isna(plus_di) or pd.isna(minus_di):
             return 0, ""
 
-        # ADX < 20: no trend — signals are unreliable, penalize
         if adx_val < 20:
             return 0, f"ADX weak ({adx_val:.0f}) — no clear trend"
 
-        # ADX >= 25: strong trend — boost signal in trend direction
-        if adx_val >= 25:
-            if plus_di > minus_di:
-                return 1, f"ADX strong trend ({adx_val:.0f}) +DI>{minus_di:.0f} — confirmed uptrend"
-            else:
-                return -1, f"ADX strong trend ({adx_val:.0f}) -DI>{plus_di:.0f} — confirmed downtrend"
+        # Scale by ADX strength (25 = 0.5, 40+ = 1.0)
+        intensity = min(1.0, (adx_val - 20) / 20)
+        if plus_di > minus_di:
+            return intensity, f"ADX strong trend ({adx_val:.0f}) — confirmed uptrend"
+        else:
+            return -intensity, f"ADX strong trend ({adx_val:.0f}) — confirmed downtrend"
 
-        return 0, ""
-
-    def _score_relative_strength(self, df: pd.DataFrame, i: int) -> Tuple[int, str]:
+    def _score_relative_strength(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
         rs = df["RS_vs_Nikkei"].iloc[i]
         if pd.isna(rs):
             return 0, ""
 
-        # RS > 1.05: stock outperforming Nikkei by 5%+
         if rs > 1.10:
-            return 2, f"Outperforming Nikkei by {(rs-1)*100:.0f}% — strong relative strength"
+            return 1.0, f"Outperforming Nikkei by {(rs-1)*100:.0f}% — strong"
         if rs > 1.03:
-            return 1, f"Outperforming Nikkei by {(rs-1)*100:.0f}%"
-        # RS < 0.95: stock underperforming Nikkei by 5%+
+            return 0.5, f"Outperforming Nikkei by {(rs-1)*100:.0f}%"
         if rs < 0.90:
-            return -2, f"Underperforming Nikkei by {(1-rs)*100:.0f}% — weak relative strength"
+            return -1.0, f"Underperforming Nikkei by {(1-rs)*100:.0f}% — weak"
         if rs < 0.97:
-            return -1, f"Underperforming Nikkei by {(1-rs)*100:.0f}%"
+            return -0.5, f"Underperforming Nikkei by {(1-rs)*100:.0f}%"
 
         return 0, ""
 
@@ -454,8 +428,8 @@ class SwingCompositeStrategy:
 
         return df
 
-    def _score_ml(self, df: pd.DataFrame, i: int) -> Tuple[int, str]:
-        """Score based on ML model prediction."""
+    def _score_ml(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
+        """Score based on ML model prediction. Returns -1.0 to +1.0."""
         if "ML_proba" not in df.columns:
             return 0, ""
 
@@ -463,24 +437,19 @@ class SwingCompositeStrategy:
         if pd.isna(proba):
             return 0, ""
 
-        # Strong conviction thresholds
-        if proba >= 0.75:
-            return 3, f"ML model: {proba:.0%} probability of +3% in 5 days"
-        if proba >= 0.60:
-            return 2, f"ML model: {proba:.0%} probability of +3% in 5 days"
+        # Map probability to -1.0..+1.0
+        # 0.5 = neutral, 0.75+ = strong buy, 0.25- = strong sell
         if proba >= 0.55:
-            return 1, f"ML model: {proba:.0%} upside probability"
-        if proba <= 0.20:
-            return -3, f"ML model: {proba:.0%} upside probability (bearish)"
-        if proba <= 0.30:
-            return -2, f"ML model: {proba:.0%} upside probability (bearish)"
-        if proba <= 0.40:
-            return -1, f"ML model: {proba:.0%} upside probability (slightly bearish)"
+            score = min(1.0, (proba - 0.5) * 4)  # 0.5→0, 0.75→1.0
+            return score, f"ML model: {proba:.0%} probability of +3% in 5 days"
+        if proba <= 0.45:
+            score = max(-1.0, (proba - 0.5) * 4)  # 0.5→0, 0.25→-1.0
+            return score, f"ML model: {proba:.0%} upside probability (bearish)"
 
         return 0, ""
 
-    def _score_sentiment(self, ticker: str) -> Tuple[int, str]:
-        """Score based on LLM news sentiment analysis."""
+    def _score_sentiment(self, ticker: str) -> Tuple[float, str]:
+        """Score based on LLM news sentiment analysis. Returns -1.0 to +1.0."""
         if not ticker or not self.sentiment_data:
             return 0, ""
 
@@ -488,29 +457,15 @@ class SwingCompositeStrategy:
         if not sentiment:
             return 0, ""
 
-        raw_score = sentiment.get("score", 0)
+        raw_score = sentiment.get("score", 0)  # -5 to +5
         confidence = sentiment.get("confidence", 0.5)
         reasoning = sentiment.get("reasoning", "")
 
-        # Scale the -5..+5 sentiment score to a trading score
-        # Apply confidence as a weight — low confidence = smaller impact
-        if confidence < 0.3:
+        if confidence < 0.3 or raw_score == 0:
             return 0, ""
 
-        if raw_score >= 4:
-            score = 3
-        elif raw_score >= 2:
-            score = 2
-        elif raw_score >= 1:
-            score = 1
-        elif raw_score <= -4:
-            score = -3
-        elif raw_score <= -2:
-            score = -2
-        elif raw_score <= -1:
-            score = -1
-        else:
-            return 0, ""
+        # Scale -5..+5 to -1.0..+1.0, weighted by confidence
+        score = (raw_score / 5.0) * confidence
 
         direction = "bullish" if score > 0 else "bearish"
-        return score, f"News sentiment {direction} ({raw_score:+d}): {reasoning}"
+        return max(-1.0, min(1.0, score)), f"News sentiment {direction} ({raw_score:+d}): {reasoning}"
