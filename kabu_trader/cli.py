@@ -144,17 +144,6 @@ def cmd_monitor(args):
         monitor.strategy.set_ml_model(ml)
         console.print("[bold green]ML model loaded[/bold green]")
 
-    # Load LLM sentiment if configured
-    sentiment_config = config.get("llm_sentiment", {})
-    llm = LLMSentimentAnalyzer(sentiment_config)
-    if llm.enabled:
-        console.print("[bold]Analyzing news sentiment via Claude...[/bold]")
-        sentiment_data = llm.analyze_multiple(
-            config["watchlist"], names,
-        )
-        monitor.strategy.set_sentiment_data(sentiment_data)
-        console.print(f"[bold green]Sentiment analyzed for {len(sentiment_data)} stocks[/bold green]")
-
     if args.once:
         monitor.run_once()
     else:
@@ -175,7 +164,7 @@ def cmd_sentiment(args):
         return
 
     console.print(Panel(
-        f"Analyzing news sentiment for {len(tickers)} stocks via Claude",
+        f"Analyzing news sentiment for {len(tickers)} stocks via GPT",
         title="News Sentiment",
         border_style="bold magenta",
     ))
@@ -352,7 +341,7 @@ def cmd_scan(args):
     sentiment_config = config.get("llm_sentiment", {})
     llm = LLMSentimentAnalyzer(sentiment_config)
     if llm.enabled:
-        console.print("[bold]Analyzing news sentiment via Claude...[/bold]")
+        console.print("[bold]Analyzing news sentiment via GPT...[/bold]")
         sentiment_data = llm.analyze_multiple(tickers, names)
         strategy.set_sentiment_data(sentiment_data)
         console.print(f"[bold green]Sentiment analyzed for {len(sentiment_data)} stocks[/bold green]")

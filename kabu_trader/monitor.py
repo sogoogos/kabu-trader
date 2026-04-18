@@ -22,6 +22,7 @@ from rich.text import Text
 from .data_fetcher import DataFetcher
 from .strategy import SwingCompositeStrategy, Signal
 from .notifier import LineNotifier
+from .llm_sentiment import LLMSentimentAnalyzer
 
 
 class Monitor:
@@ -38,7 +39,9 @@ class Monitor:
         self.alerts: List[dict] = []
         self.tz = ZoneInfo(self.monitor_config["timezone"])
         self.line = LineNotifier(config.get("line", {}))
+        self.llm = LLMSentimentAnalyzer(config.get("llm_sentiment", {}))
         self._sent_signals: set = set()  # track sent alerts to avoid duplicates
+        self._last_sentiment_time: float = 0  # timestamp of last sentiment refresh
 
     def _is_trading_hours(self) -> bool:
         now = datetime.now(self.tz)
@@ -123,9 +126,28 @@ class Monitor:
 
         return Panel("\n".join(lines), title="Trading Signals", border_style="bold yellow")
 
+    def _refresh_sentiment(self):
+        """Refresh LLM sentiment analysis once per hour."""
+        if not self.llm.enabled:
+            return
+
+        import time
+        now = time.time()
+        if now - self._last_sentiment_time < 3600:
+            return
+
+        self.console.print("[bold]Refreshing news sentiment via GPT...[/bold]")
+        sentiment_data = self.llm.analyze_multiple(self.watchlist, self.names)
+        self.strategy.set_sentiment_data(sentiment_data)
+        self._last_sentiment_time = now
+        self.console.print(
+            f"[bold green]Sentiment updated for {len(sentiment_data)} stocks[/bold green]"
+        )
+
     def _analyze_signals(self):
         """Fetch recent data and analyze signals for all watchlist stocks."""
         self.alerts = []
+        self._refresh_sentiment()
         nikkei_df = self.fetcher.fetch_nikkei225(days=60)
         self.strategy.set_nikkei_data(nikkei_df)
         data = self.fetcher.fetch_multiple(self.watchlist, days=60, interval="1d")

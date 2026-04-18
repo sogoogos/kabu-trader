@@ -24,12 +24,23 @@ def fetch_stock_news(ticker: str, max_items: int = 10) -> List[dict]:
 
     results = []
     for item in news[:max_items]:
-        results.append({
-            "title": item.get("title", ""),
-            "publisher": item.get("publisher", ""),
-            "link": item.get("link", ""),
-            "published": item.get("providerPublishTime", ""),
-        })
+        # yfinance nests data under "content" in newer versions
+        content = item.get("content", item)
+        provider = content.get("provider", {})
+        canonical = content.get("canonicalUrl", {})
+
+        title = content.get("title", "") or item.get("title", "")
+        publisher = provider.get("displayName", "") or item.get("publisher", "")
+        link = canonical.get("url", "") or item.get("link", "")
+        published = content.get("pubDate", "") or item.get("providerPublishTime", "")
+
+        if title:
+            results.append({
+                "title": title,
+                "publisher": publisher,
+                "link": link,
+                "published": published,
+            })
 
     return results
 
