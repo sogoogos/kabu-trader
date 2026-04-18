@@ -46,6 +46,7 @@ class BacktestResult:
     final_capital: float
     trades: List[Trade]
     equity_curve: pd.Series
+    currency_symbol: str = "¥"
 
     @property
     def total_return_pct(self) -> float:
@@ -106,10 +107,11 @@ class BacktestResult:
         return returns.mean() / returns.std() * np.sqrt(252)
 
     def summary(self) -> dict:
+        sym = self.currency_symbol
         return {
             "ticker": self.ticker,
-            "initial_capital": f"¥{self.initial_capital:,.0f}",
-            "final_capital": f"¥{self.final_capital:,.0f}",
+            "initial_capital": f"{sym}{self.initial_capital:,.0f}",
+            "final_capital": f"{sym}{self.final_capital:,.0f}",
             "total_return": f"{self.total_return_pct:+.2f}%",
             "total_trades": self.total_trades,
             "win_rate": f"{self.win_rate:.1f}%",
@@ -124,13 +126,16 @@ class BacktestResult:
 class Backtester:
     """Backtesting engine that simulates trades on historical data."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, currency_symbol: str = "¥"):
         self.initial_capital = config["initial_capital"]
         self.commission_rate = config["commission_rate"]
         self.position_size_pct = config["position_size_pct"]
         self.max_positions = config["max_positions"]
         self.stop_loss_pct = config["stop_loss_pct"]
         self.take_profit_pct = config["take_profit_pct"]
+        # Lot size: 100 for Japanese stocks, 1 for US stocks
+        self.shares_per_lot = config.get("shares_per_lot", 100)
+        self.currency_symbol = currency_symbol
 
     def run(
         self,
@@ -150,7 +155,7 @@ class Backtester:
         """
         from . import indicators
 
-        df = indicators.compute_all(df, strategy.params, strategy.nikkei_df)
+        df = indicators.compute_all(df, strategy.params, strategy.benchmark_df)
 
         capital = self.initial_capital
         open_trades: List[Trade] = []
@@ -197,8 +202,8 @@ class Backtester:
             if score >= threshold and len(open_trades) < self.max_positions:
                 position_value = capital * self.position_size_pct
                 if position_value > 0 and close > 0:
-                    # Japanese stocks trade in units of 100
-                    shares = max(100, int(position_value / close / 100) * 100)
+                    lot = self.shares_per_lot
+                    shares = max(lot, int(position_value / close / lot) * lot)
                     cost = close * shares
                     commission = cost * self.commission_rate
 
@@ -249,6 +254,7 @@ class Backtester:
             final_capital=capital,
             trades=all_trades,
             equity_curve=equity_curve,
+            currency_symbol=self.currency_symbol,
         )
 
     def run_multiple(

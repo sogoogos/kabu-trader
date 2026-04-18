@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 
-DATA_DIR = Path(__file__).parent.parent / "paper_trading"
+PROJECT_ROOT = Path(__file__).parent.parent
+DEFAULT_DATA_DIR = PROJECT_ROOT / "paper_trading"
 
 
 class Position:
@@ -66,13 +67,23 @@ class Position:
 class PaperTrader:
     """Simulates trading with virtual money. Persists state to disk."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, state_dir: Optional[Path] = None):
         self.initial_capital = config.get("initial_capital", 1000000)
         self.commission_rate = config.get("commission_rate", 0.001)
         self.position_size_pct = config.get("position_size_pct", 0.1)
         self.max_positions = config.get("max_positions", 5)
         self.stop_loss_pct = config.get("stop_loss_pct", 0.05)
         self.take_profit_pct = config.get("take_profit_pct", 0.15)
+        self.shares_per_lot = config.get("shares_per_lot", 100)
+
+        if state_dir:
+            state_path = Path(state_dir)
+            # Relative paths resolve relative to the project root
+            if not state_path.is_absolute():
+                state_path = PROJECT_ROOT / state_path
+            self.state_dir = state_path
+        else:
+            self.state_dir = DEFAULT_DATA_DIR
 
         self.cash: float = self.initial_capital
         self.positions: Dict[str, Position] = {}
@@ -82,8 +93,8 @@ class PaperTrader:
         self._load()
 
     def _state_path(self) -> Path:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        return DATA_DIR / "state.json"
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        return self.state_dir / "state.json"
 
     def _load(self):
         """Load state from disk."""
@@ -196,8 +207,8 @@ class PaperTrader:
         """Execute a virtual buy."""
         position_value = self.cash * self.position_size_pct
 
-        # Japanese stocks trade in units of 100
-        shares = max(100, int(position_value / price / 100) * 100)
+        lot = self.shares_per_lot
+        shares = max(lot, int(position_value / price / lot) * lot)
         cost = price * shares
         commission = cost * self.commission_rate
 

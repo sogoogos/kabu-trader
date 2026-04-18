@@ -18,19 +18,18 @@ from typing import Tuple
 from . import indicators
 
 
-def engineer_features(df: pd.DataFrame, params: dict, nikkei_df: pd.DataFrame = None) -> pd.DataFrame:
+def engineer_features(df: pd.DataFrame, params: dict, benchmark_df: pd.DataFrame = None) -> pd.DataFrame:
     """Create ML features from OHLCV data.
 
     Args:
         df: OHLCV DataFrame
         params: Strategy parameters
-        nikkei_df: Optional Nikkei 225 data for relative strength
+        benchmark_df: Optional market benchmark data for relative strength
 
     Returns:
         DataFrame with feature columns (NaN rows at start should be dropped)
     """
-    # First compute all standard indicators
-    df = indicators.compute_all(df, params, nikkei_df)
+    df = indicators.compute_all(df, params, benchmark_df)
 
     close = df["Close"]
     high = df["High"]
@@ -118,8 +117,10 @@ def engineer_features(df: pd.DataFrame, params: dict, nikkei_df: pd.DataFrame = 
     df["adx_value"] = df["ADX"]
     df["di_diff"] = df["Plus_DI"] - df["Minus_DI"]
 
-    # Relative strength vs Nikkei
-    df["rs_nikkei"] = df["RS_vs_Nikkei"]
+    # Relative strength vs market benchmark (name kept as rs_nikkei for backward
+    # compatibility with previously trained JP models — the column holds RS vs
+    # whichever benchmark was configured)
+    df["rs_nikkei"] = df["RS_vs_Benchmark"]
 
     # === Mean reversion features ===
     # Z-score: how many std devs from 20-day mean
@@ -179,7 +180,7 @@ def get_feature_columns() -> list:
 def prepare_dataset(
     data: dict,
     params: dict,
-    nikkei_df: pd.DataFrame = None,
+    benchmark_df: pd.DataFrame = None,
     forward_days: int = 5,
     threshold: float = 0.03,
 ) -> Tuple[pd.DataFrame, pd.Series]:
@@ -188,7 +189,7 @@ def prepare_dataset(
     Args:
         data: Dict of ticker -> OHLCV DataFrame
         params: Strategy parameters
-        nikkei_df: Nikkei 225 data
+        benchmark_df: Market benchmark data (Nikkei, S&P 500, etc.)
         forward_days: Days ahead for target
         threshold: Return threshold for positive target
 
@@ -203,7 +204,7 @@ def prepare_dataset(
         if len(df) < 60:
             continue
 
-        featured = engineer_features(df, params, nikkei_df)
+        featured = engineer_features(df, params, benchmark_df)
         target = create_target(featured, forward_days, threshold)
 
         # Add ticker as a column for reference (not used as feature)

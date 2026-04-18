@@ -1,4 +1,4 @@
-"""Data fetcher module for Japanese stock market data using yfinance."""
+"""Data fetcher module for stock market data using yfinance."""
 
 from __future__ import annotations
 
@@ -9,10 +9,11 @@ from typing import Dict, List, Optional
 
 
 class DataFetcher:
-    """Fetches historical and current stock data for Japanese equities."""
+    """Fetches historical and current stock data for any yfinance-supported market."""
 
-    def __init__(self):
+    def __init__(self, benchmark_ticker: str = "^N225"):
         self._cache: Dict[str, pd.DataFrame] = {}
+        self.benchmark_ticker = benchmark_ticker
 
     def fetch_historical(
         self,
@@ -93,12 +94,12 @@ class DataFetcher:
                 print(f"Warning: Failed to fetch current price for {ticker}: {e}")
         return results
 
-    def fetch_nikkei225(self, days: int = 365) -> pd.DataFrame:
-        """Fetch Nikkei 225 index data for relative strength comparison."""
+    def fetch_benchmark(self, days: int = 365) -> pd.DataFrame:
+        """Fetch the market benchmark index for relative strength comparison."""
         try:
-            return self.fetch_historical("^N225", days=days)
+            return self.fetch_historical(self.benchmark_ticker, days=days)
         except Exception as e:
-            print(f"Warning: Failed to fetch Nikkei 225: {e}")
+            print(f"Warning: Failed to fetch benchmark {self.benchmark_ticker}: {e}")
             return pd.DataFrame()
 
     def get_cached(self, ticker: str) -> Optional[pd.DataFrame]:

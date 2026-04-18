@@ -15,6 +15,7 @@ models/*.pkl
 
 # Paper trading state (contains your simulated portfolio)
 paper_trading/
+paper_trading_us/
 
 # IDE
 .vscode/
@@ -28,3 +29,5 @@ Thumbs.db
 
 # Secrets - NEVER commit these
 config/default.json
+config/us.json
+.env

@@ -185,13 +185,14 @@ def relative_strength_vs_index(stock_close: pd.Series, index_close: pd.Series, p
     return stock_ret / index_ret
 
 
-def compute_all(df: pd.DataFrame, params: dict, nikkei_df: pd.DataFrame = None) -> pd.DataFrame:
+def compute_all(df: pd.DataFrame, params: dict, benchmark_df: pd.DataFrame = None) -> pd.DataFrame:
     """Compute all indicators and add them as columns to the DataFrame.
 
     Args:
         df: DataFrame with OHLCV columns
         params: Strategy parameters dict
-        nikkei_df: Optional Nikkei 225 DataFrame for relative strength
+        benchmark_df: Optional market benchmark DataFrame (e.g., Nikkei 225, S&P 500)
+            used for relative strength
 
     Returns:
         DataFrame with indicator columns added
@@ -248,13 +249,12 @@ def compute_all(df: pd.DataFrame, params: dict, nikkei_df: pd.DataFrame = None) 
     df["Plus_DI"] = adx_result["Plus_DI"]
     df["Minus_DI"] = adx_result["Minus_DI"]
 
-    # Relative Strength vs Nikkei 225
-    if nikkei_df is not None and not nikkei_df.empty:
-        # Align index dates
-        nikkei_aligned = nikkei_df["Close"].reindex(df.index, method="ffill")
+    # Relative Strength vs market benchmark (Nikkei 225, S&P 500, etc.)
+    if benchmark_df is not None and not benchmark_df.empty:
+        benchmark_aligned = benchmark_df["Close"].reindex(df.index, method="ffill")
         rs_period = params.get("rs_period", 20)
-        df["RS_vs_Nikkei"] = relative_strength_vs_index(close, nikkei_aligned, rs_period)
+        df["RS_vs_Benchmark"] = relative_strength_vs_index(close, benchmark_aligned, rs_period)
     else:
-        df["RS_vs_Nikkei"] = np.nan
+        df["RS_vs_Benchmark"] = np.nan
 
     return df

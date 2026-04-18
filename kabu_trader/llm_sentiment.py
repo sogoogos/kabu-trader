@@ -1,4 +1,4 @@
-"""LLM-based sentiment analysis for Japanese stocks using OpenAI API.
+"""LLM-based sentiment analysis for stocks using OpenAI API.
 
 Analyzes news headlines and generates structured sentiment scores
 that feed into the composite trading signal.
@@ -14,13 +14,13 @@ from typing import Dict, List, Optional, Tuple
 from .news_fetcher import fetch_stock_news
 
 
-SENTIMENT_PROMPT = """You are a Japanese stock market analyst. Analyze the following news headlines for {company} ({ticker}) and provide a trading sentiment assessment.
+SENTIMENT_PROMPT = """You are a stock market analyst. Analyze the following news headlines for {company} ({ticker}) and provide a trading sentiment assessment.
 
 News headlines:
 {headlines}
 
 Additional context:
-- Current price: ¥{price:,.0f}
+- Current price: {price_str}
 - Recent performance: {performance}
 
 Respond in the following JSON format only, with no other text:
@@ -105,11 +105,12 @@ class LLMSentimentAnalyzer:
             for item in news
         )
 
+        price_str = f"{price:,.2f}" if price else "N/A"
         prompt = SENTIMENT_PROMPT.format(
             company=company_name or ticker,
             ticker=ticker,
             headlines=headlines,
-            price=price,
+            price_str=price_str,
             performance=performance or "N/A",
         )
 

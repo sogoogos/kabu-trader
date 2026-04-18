@@ -25,38 +25,56 @@ DEFAULT_CONFIG = Path(__file__).parent.parent / "config" / "default.json"
 
 
 def load_config(config_path: Optional[str] = None) -> dict:
-    path = Path(config_path) if config_path else DEFAULT_CONFIG
+    import os
+    path = Path(config_path) if config_path else Path(
+        os.environ.get("KABU_CONFIG", DEFAULT_CONFIG)
+    )
     with open(path) as f:
         return json.load(f)
+
+
+def get_market_settings(config: dict) -> dict:
+    """Extract market-level settings (benchmark, currency, lot size, etc.)."""
+    market = config.get("market", {})
+    return {
+        "currency_symbol": market.get("currency_symbol", "¥"),
+        "currency_code": market.get("currency_code", "JPY"),
+        "benchmark_ticker": market.get("benchmark_ticker", "^N225"),
+        "benchmark_name": market.get("benchmark_name", "Nikkei 225"),
+        "market_name": market.get("name", "JP"),
+        "state_dir": market.get("state_dir"),
+    }
 
 
 def cmd_backtest(args):
     """Run backtest on historical data."""
     config = load_config(args.config)
+    market = get_market_settings(config)
     tickers = args.tickers or config["watchlist"]
     days = args.days or config["backtest"]["lookback_days"]
     names = config.get("watchlist_names", {})
+    model_name = config.get("ml", {}).get("model_name", "default")
 
     console.print(Panel(
-        f"Running backtest on {len(tickers)} stocks over {days} days",
+        f"Running backtest on {len(tickers)} [{market['market_name']}] stocks over {days} days",
         title="Backtest",
         border_style="bold blue",
     ))
 
-    fetcher = DataFetcher()
-    strategy = SwingCompositeStrategy(config["strategy"]["params"])
-    backtester = Backtester(config["backtest"])
+    fetcher = DataFetcher(benchmark_ticker=market["benchmark_ticker"])
+    strategy = SwingCompositeStrategy(config["strategy"]["params"], market["benchmark_name"])
+    backtester = Backtester(config["backtest"], currency_symbol=market["currency_symbol"])
 
     # Load ML model if available
     from .ml_model import MLPredictor
     ml = MLPredictor()
-    if ml.load():
+    if ml.load(model_name):
         strategy.set_ml_model(ml)
-        console.print("[bold green]ML model loaded[/bold green]")
+        console.print(f"[bold green]ML model '{model_name}' loaded[/bold green]")
 
     console.print("[bold]Fetching historical data...[/bold]")
-    nikkei_df = fetcher.fetch_nikkei225(days=days)
-    strategy.set_nikkei_data(nikkei_df)
+    benchmark_df = fetcher.fetch_benchmark(days=days)
+    strategy.set_benchmark_data(benchmark_df)
     data = fetcher.fetch_multiple(tickers, days=days)
 
     if not data:
@@ -111,17 +129,18 @@ def cmd_backtest(args):
             trade_table.add_column("P&L %", justify="right")
             trade_table.add_column("Reason")
 
+            sym = market["currency_symbol"]
             for trade in result.trades:
                 pnl = trade.pnl
-                pnl_str = f"[green]¥{pnl:+,.0f}[/green]" if pnl > 0 else f"[red]¥{pnl:+,.0f}[/red]"
+                pnl_str = f"[green]{sym}{pnl:+,.2f}[/green]" if pnl > 0 else f"[red]{sym}{pnl:+,.2f}[/red]"
                 pnl_pct = trade.pnl_pct
                 pnl_pct_str = f"[green]{pnl_pct:+.2f}%[/green]" if pnl_pct > 0 else f"[red]{pnl_pct:+.2f}%[/red]"
 
                 trade_table.add_row(
                     str(trade.entry_date.date()),
                     str(trade.exit_date.date()) if trade.exit_date else "OPEN",
-                    f"¥{trade.entry_price:,.0f}",
-                    f"¥{trade.exit_price:,.0f}" if trade.exit_price else "-",
+                    f"{sym}{trade.entry_price:,.2f}",
+                    f"{sym}{trade.exit_price:,.2f}" if trade.exit_price else "-",
                     str(trade.shares),
                     pnl_str,
                     pnl_pct_str,
@@ -134,26 +153,30 @@ def cmd_backtest(args):
 def cmd_monitor(args):
     """Start real-time monitoring."""
     config = load_config(args.config)
+    market = get_market_settings(config)
     names = config.get("watchlist_names", {})
+    model_name = config.get("ml", {}).get("model_name", "default")
     monitor = Monitor(config, names)
 
     # Load ML model if available
     from .ml_model import MLPredictor
     ml = MLPredictor()
-    if ml.load():
+    if ml.load(model_name):
         monitor.strategy.set_ml_model(ml)
-        console.print("[bold green]ML model loaded[/bold green]")
+        console.print(f"[bold green]ML model '{model_name}' loaded[/bold green]")
 
     # Enable paper trading
     if args.paper:
         from .paper_trader import PaperTrader
-        monitor.paper_trader = PaperTrader(config["backtest"])
+        state_dir = Path(market["state_dir"]) if market["state_dir"] else None
+        monitor.paper_trader = PaperTrader(config["backtest"], state_dir=state_dir)
         monitor.line.paper_mode = True
         summary = monitor.paper_trader.get_summary()
+        sym = market["currency_symbol"]
         console.print(Panel(
-            f"Paper trading enabled\n"
-            f"Capital: ¥{summary['initial_capital']:,.0f} | "
-            f"Current: ¥{summary['total_value']:,.0f} ({summary['total_return_pct']:+.2f}%)\n"
+            f"Paper trading enabled [{market['market_name']}]\n"
+            f"Capital: {sym}{summary['initial_capital']:,.2f} | "
+            f"Current: {sym}{summary['total_value']:,.2f} ({summary['total_return_pct']:+.2f}%)\n"
             f"Open positions: {summary['open_positions']} | "
             f"Closed trades: {summary['total_closed_trades']}",
             title="Paper Trading",
@@ -171,8 +194,11 @@ def cmd_report(args):
     from .paper_trader import PaperTrader
 
     config = load_config(args.config)
+    market = get_market_settings(config)
     names = config.get("watchlist_names", {})
-    trader = PaperTrader(config["backtest"])
+    state_dir = Path(market["state_dir"]) if market["state_dir"] else None
+    trader = PaperTrader(config["backtest"], state_dir=state_dir)
+    sym = market["currency_symbol"]
 
     if args.reset:
         trader.reset()
@@ -180,7 +206,7 @@ def cmd_report(args):
         return
 
     # Fetch current prices for open positions
-    fetcher = DataFetcher()
+    fetcher = DataFetcher(benchmark_ticker=market["benchmark_ticker"])
     price_dict = {}
     if trader.positions:
         tickers = list(trader.positions.keys())
@@ -193,15 +219,15 @@ def cmd_report(args):
     ret = summary["total_return_pct"]
     ret_color = "green" if ret > 0 else "red"
     console.print(Panel(
-        f"Initial: ¥{summary['initial_capital']:,.0f}\n"
-        f"Current: ¥{summary['total_value']:,.0f} [{ret_color}]({ret:+.2f}%)[/{ret_color}]\n"
-        f"Cash: ¥{summary['cash']:,.0f}\n"
+        f"Initial: {sym}{summary['initial_capital']:,.2f}\n"
+        f"Current: {sym}{summary['total_value']:,.2f} [{ret_color}]({ret:+.2f}%)[/{ret_color}]\n"
+        f"Cash: {sym}{summary['cash']:,.2f}\n"
         f"Days running: {summary['days_running']}\n"
         f"Closed trades: {summary['total_closed_trades']} "
         f"(W: {summary['winning_trades']} / L: {summary['losing_trades']} | "
         f"Win rate: {summary['win_rate']:.0f}%)\n"
-        f"Total realized P&L: ¥{summary['total_pnl']:+,.0f}",
-        title="Paper Trading Report",
+        f"Total realized P&L: {sym}{summary['total_pnl']:+,.2f}",
+        title=f"Paper Trading Report [{market['market_name']}]",
         border_style="bold cyan",
     ))
 
@@ -225,8 +251,8 @@ def cmd_report(args):
 
             pos_table.add_row(
                 ticker, pos.name, str(pos.shares),
-                f"¥{pos.entry_price:,.0f}", f"¥{price:,.0f}",
-                f"[{color}]¥{pnl:+,.0f}[/{color}]",
+                f"{sym}{pos.entry_price:,.2f}", f"{sym}{price:,.2f}",
+                f"[{color}]{sym}{pnl:+,.2f}[/{color}]",
                 f"[{color}]{pnl_pct:+.1f}%[/{color}]",
                 pos.entry_date[:10],
             )
@@ -256,7 +282,7 @@ def cmd_report(args):
                 pnl = trade.get("pnl", 0)
                 pnl_pct = trade.get("pnl_pct", 0)
                 color = "green" if pnl > 0 else "red"
-                pnl_str = f"[{color}]¥{pnl:+,.0f} ({pnl_pct:+.1f}%)[/{color}]"
+                pnl_str = f"[{color}]{sym}{pnl:+,.2f} ({pnl_pct:+.1f}%)[/{color}]"
                 reason = trade.get("reason", "")
             else:
                 reason = f"score: {trade.get('score', '')}"
@@ -264,7 +290,7 @@ def cmd_report(args):
             log_table.add_row(
                 trade["timestamp"][:16], action_str,
                 trade["ticker"], trade["name"],
-                f"¥{trade['price']:,.0f}", str(trade["shares"]),
+                f"{sym}{trade['price']:,.2f}", str(trade["shares"]),
                 pnl_str, reason,
             )
 
@@ -283,7 +309,7 @@ def cmd_report(args):
                 bar = f"[red]{'█' * bar_len} {ret_val:+.2f}%[/red]"
             else:
                 bar = f"{ret_val:+.2f}%"
-            console.print(f"  {snap['date'][:10]} ¥{snap['total']:>12,.0f} {bar}")
+            console.print(f"  {snap['date'][:10]} {sym}{snap['total']:>12,.2f} {bar}")
 
 
 def cmd_sentiment(args):
@@ -350,21 +376,23 @@ def cmd_train(args):
     from .ml_model import train_final_model, walk_forward_evaluate, MLPredictor
 
     config = load_config(args.config)
+    market = get_market_settings(config)
     tickers = args.tickers or config["watchlist"]
     days = args.days or 730
     ml_config = config.get("ml", {})
+    model_name = ml_config.get("model_name", "default")
 
     console.print(Panel(
-        f"Training ML model on {len(tickers)} stocks over {days} days",
+        f"Training ML model '{model_name}' on {len(tickers)} [{market['market_name']}] stocks over {days} days",
         title="ML Training",
         border_style="bold magenta",
     ))
 
-    fetcher = DataFetcher()
+    fetcher = DataFetcher(benchmark_ticker=market["benchmark_ticker"])
     params = config["strategy"]["params"]
 
     console.print("[bold]Fetching historical data...[/bold]")
-    nikkei_df = fetcher.fetch_nikkei225(days=days)
+    benchmark_df = fetcher.fetch_benchmark(days=days)
     data = fetcher.fetch_multiple(tickers, days=days)
 
     if not data:
@@ -376,7 +404,7 @@ def cmd_train(args):
     # Walk-forward evaluation first
     console.print("\n[bold]Running walk-forward evaluation (5 folds)...[/bold]")
     eval_result = walk_forward_evaluate(
-        data, params, nikkei_df,
+        data, params, benchmark_df,
         n_splits=5,
         forward_days=ml_config.get("forward_days", 5),
         threshold=ml_config.get("threshold", 0.03),
@@ -428,13 +456,14 @@ def cmd_train(args):
     # Train final model on all data
     console.print("\n[bold]Training final model on all data...[/bold]")
     model, metrics = train_final_model(
-        data, params, nikkei_df,
+        data, params, benchmark_df,
         forward_days=ml_config.get("forward_days", 5),
         threshold=ml_config.get("threshold", 0.03),
         ml_params=ml_config.get("model_params"),
+        save_name=model_name,
     )
 
-    console.print(f"[green]Model saved to models/default.pkl[/green]")
+    console.print(f"[green]Model saved to models/{model_name}.pkl[/green]")
     console.print(f"Training accuracy: {metrics['accuracy']:.3f} | "
                   f"AUC-ROC: {metrics['auc_roc']:.3f}")
 
@@ -454,24 +483,27 @@ def cmd_train(args):
 def cmd_scan(args):
     """Scan watchlist for current trading signals."""
     config = load_config(args.config)
+    market = get_market_settings(config)
     tickers = args.tickers or config["watchlist"]
     names = config.get("watchlist_names", {})
+    model_name = config.get("ml", {}).get("model_name", "default")
+    sym = market["currency_symbol"]
 
     console.print(Panel(
-        f"Scanning {len(tickers)} stocks for signals",
+        f"Scanning {len(tickers)} [{market['market_name']}] stocks for signals",
         title="Signal Scanner",
         border_style="bold blue",
     ))
 
-    fetcher = DataFetcher()
-    strategy = SwingCompositeStrategy(config["strategy"]["params"])
+    fetcher = DataFetcher(benchmark_ticker=market["benchmark_ticker"])
+    strategy = SwingCompositeStrategy(config["strategy"]["params"], market["benchmark_name"])
 
     # Load ML model if available
     from .ml_model import MLPredictor
     ml = MLPredictor()
-    if ml.load():
+    if ml.load(model_name):
         strategy.set_ml_model(ml)
-        console.print("[bold green]ML model loaded[/bold green]")
+        console.print(f"[bold green]ML model '{model_name}' loaded[/bold green]")
 
     # Load LLM sentiment if configured
     sentiment_config = config.get("llm_sentiment", {})
@@ -483,8 +515,8 @@ def cmd_scan(args):
         console.print(f"[bold green]Sentiment analyzed for {len(sentiment_data)} stocks[/bold green]")
 
     console.print("[bold]Fetching data...[/bold]")
-    nikkei_df = fetcher.fetch_nikkei225(days=60)
-    strategy.set_nikkei_data(nikkei_df)
+    benchmark_df = fetcher.fetch_benchmark(days=60)
+    strategy.set_benchmark_data(benchmark_df)
     data = fetcher.fetch_multiple(tickers, days=60)
 
     table = Table(title="Current Signals", show_header=True, header_style="bold cyan")
@@ -512,7 +544,7 @@ def cmd_scan(args):
         reasons_str = "; ".join(signal.reasons[:3]) if signal.reasons else "-"
 
         table.add_row(
-            ticker, name, f"¥{signal.price:,.0f}",
+            ticker, name, f"{sym}{signal.price:,.2f}",
             sig_str, str(signal.score), reasons_str,
         )
 

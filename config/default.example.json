@@ -1,4 +1,12 @@
 {
+  "market": {
+    "name": "JP",
+    "currency_symbol": "¥",
+    "currency_code": "JPY",
+    "benchmark_ticker": "^N225",
+    "benchmark_name": "Nikkei 225",
+    "state_dir": "paper_trading"
+  },
   "watchlist": [
     "7203.T",
     "7267.T",
@@ -252,7 +260,8 @@
     "max_positions": 5,
     "stop_loss_pct": 0.05,
     "take_profit_pct": 0.15,
-    "lookback_days": 365
+    "lookback_days": 365,
+    "shares_per_lot": 100
   },
   "monitor": {
     "interval_seconds": 60,
@@ -268,6 +277,7 @@
   "ml": {
     "forward_days": 5,
     "threshold": 0.03,
+    "model_name": "default",
     "model_params": {
       "n_estimators": 200,
       "max_depth": 4,

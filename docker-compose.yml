@@ -1,15 +1,33 @@
 services:
-  kabu-trader:
+  kabu-trader-jp:
     build: .
-    container_name: kabu-trader
+    container_name: kabu-trader-jp
     restart: unless-stopped
+    command: ["-c", "/app/config/default.json", "monitor", "--paper"]
     volumes:
       - ./config:/app/config
       - ./paper_trading:/app/paper_trading
       - ./models:/app/models
     environment:
       - TZ=Asia/Tokyo
-      # Uncomment and set these instead of putting them in config
-      # - OPENAI_API_KEY=sk-...
-      # - LINE_CHANNEL_ACCESS_TOKEN=...
-      # - LINE_USER_ID=U...
+      # Secrets come from .env (git-ignored). Copy .env.example to .env and fill in.
+      # For env vars to take effect, the matching fields in config/default.json
+      # must be empty ("") — otherwise the config value wins.
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN:-}
+      - LINE_USER_ID=${LINE_USER_ID:-}
+
+  kabu-trader-us:
+    build: .
+    container_name: kabu-trader-us
+    restart: unless-stopped
+    command: ["-c", "/app/config/us.json", "monitor", "--paper"]
+    volumes:
+      - ./config:/app/config
+      - ./paper_trading_us:/app/paper_trading_us
+      - ./models:/app/models
+    environment:
+      - TZ=America/New_York
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN:-}
+      - LINE_USER_ID=${LINE_USER_ID:-}

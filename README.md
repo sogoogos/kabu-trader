@@ -1,13 +1,18 @@
 # Kabu Trader
 
-Japanese stock swing trading system with real-time monitoring, signal scanning, and backtesting.
+Swing trading system with real-time monitoring, signal scanning, and backtesting.
+Ships with configs for Japan (TSE) and US markets — run both simultaneously
+via docker-compose.
 
 ## Features
 
 - **Backtest** - Test trading strategies against historical data with detailed performance metrics
 - **Scan** - Scan stocks for current buy/sell signals
-- **Monitor** - Real-time price monitoring with alerts during Tokyo market hours (9:00-15:00 JST)
+- **Monitor** - Real-time price monitoring with alerts during market hours
+  (9:00-15:00 JST for Japan, 9:30-16:00 ET for US)
 - **LINE Alerts** - Get buy/sell signals sent to your phone via LINE (free)
+- **Multi-market** - Run JP and US in separate containers with isolated paper
+  trading ledgers (JPY vs USD capital pools, Nikkei vs S&P 500 benchmark)
 
 ## Setup
 
@@ -30,27 +35,39 @@ pip install yfinance pandas numpy rich scikit-learn openai
 ```bash
 # Copy the example config and fill in your credentials
 cp config/default.example.json config/default.json
+# (config/us.json ships pre-filled — tune the watchlist/capital if you want)
 
-# Build and start (runs paper trading monitor by default)
+# Build and start both markets (JP + US paper trading)
 docker compose up -d
 
-# Check logs
-docker compose logs -f
+# Or start only one
+docker compose up -d kabu-trader-jp
+docker compose up -d kabu-trader-us
 
-# Check paper trading report
-docker compose exec kabu-trader python -m kabu_trader.cli report
+# Check logs
+docker compose logs -f kabu-trader-jp
+docker compose logs -f kabu-trader-us
+
+# Check paper trading reports
+docker compose exec kabu-trader-jp python -m kabu_trader.cli -c /app/config/default.json report
+docker compose exec kabu-trader-us python -m kabu_trader.cli -c /app/config/us.json report
 
 # Run a scan
-docker compose exec kabu-trader python -m kabu_trader.cli scan
+docker compose exec kabu-trader-jp python -m kabu_trader.cli -c /app/config/default.json scan
+docker compose exec kabu-trader-us python -m kabu_trader.cli -c /app/config/us.json scan
 
-# Train ML model
-docker compose exec kabu-trader python -m kabu_trader.cli train
+# Train ML models (one per market)
+docker compose exec kabu-trader-jp python -m kabu_trader.cli -c /app/config/default.json train
+docker compose exec kabu-trader-us python -m kabu_trader.cli -c /app/config/us.json train
 
 # Stop
 docker compose down
 ```
 
-Config, paper trading state, and trained models are mounted as volumes and persist across container restarts. The container auto-restarts after crashes or server reboots.
+Each market has its own paper trading state directory (`paper_trading/` for JP,
+`paper_trading_us/` for US) and its own trained ML model
+(`models/default.pkl` for JP, `models/us.pkl` for US). Config, state, and
+models are mounted as volumes and persist across container restarts.
 
 ### Cloud Server Setup (Oracle Cloud / EC2 / etc.)
 
@@ -85,12 +102,17 @@ docker compose logs -f
 
 ## Usage
 
+All commands default to `config/default.json` (the JP market). Pass
+`-c config/us.json` for the US market, or set the `KABU_CONFIG` env var.
+
 ```bash
 # Analyze news sentiment for all stocks (requires OpenAI API key)
 python3 -m kabu_trader.cli sentiment
+python3 -m kabu_trader.cli -c config/us.json sentiment  # US market
 
 # Analyze specific stocks
 python3 -m kabu_trader.cli sentiment -t 7203.T 9984.T
+python3 -m kabu_trader.cli -c config/us.json sentiment -t AAPL MSFT
 
 # Train the ML model (do this first for best results)
 python3 -m kabu_trader.cli train
@@ -145,13 +167,18 @@ Test the system with virtual money before risking real capital.
 python3 -m kabu_trader.cli monitor --paper
 ```
 
-- Starts with **¥1,000,000** virtual capital
+- Starts with **¥1,000,000** (JP) or **$10,000** (US) virtual capital (tune via
+  `backtest.initial_capital` in config)
 - Simulates trades at real market prices when signals trigger
 - Tracks stop loss (-5%) and take profit (+15%) automatically
 - Max 5 concurrent positions, 10% of capital per trade
-- State saved to `paper_trading/state.json` — survives restarts
-- LINE notifications tagged with `🧪 PAPER TEST` to distinguish from live
-- Check results any time with `python3 -m kabu_trader.cli report`
+- Lot size 100 for JP (TSE round lots), 1 for US
+- State saved per-market: `paper_trading/state.json` (JP) and
+  `paper_trading_us/state.json` (US) — each survives restarts independently
+- LINE notifications tagged with `🧪 PAPER TEST` and `[JP]` / `[US]` so you
+  can tell the markets apart
+- Check results any time with `python3 -m kabu_trader.cli report` (or
+  `-c config/us.json report` for the US ledger)
 
 Recommended: run for 1-2 weeks before committing real money.
 
@@ -241,21 +268,38 @@ Or use environment variable: `export OPENAI_API_KEY="sk-..."`
 | `take_profit_pct` | 0.15 | +15% take profit |
 | `commission_rate` | 0.001 | 0.1% commission per trade |
 
-## Default Watchlist
+## Default Watchlists
 
-109 major Japanese stocks across 15 sectors including automotive, electronics/semiconductors, banking/finance, pharma, trading companies, heavy industry, food/beverage, retail, energy, gaming, and more.
+- **JP (`config/default.json`)** — 109 major Japanese stocks across 15 sectors
+  including automotive, electronics/semiconductors, banking/finance, pharma,
+  trading companies, heavy industry, food/beverage, retail, energy, gaming.
+- **US (`config/us.json`)** — ~100 large-cap US stocks spanning mega-cap
+  tech, financials, healthcare, energy, consumer, industrials, telecom, autos,
+  and fintech.
 
-See `config/default.json` for the full list. Edit it to customize the watchlist, strategy parameters, and risk management settings.
+Edit either file to customize the watchlist, strategy parameters, and risk
+management settings.
 
 ## Configuration
 
-All settings live in `config/default.json`. Key sections:
+JP settings live in `config/default.json`; US settings in `config/us.json`.
+Key sections:
 
-- **watchlist** - Array of ticker symbols (use `.T` suffix for Tokyo Stock Exchange)
+- **market** - `name`, `currency_symbol`, `currency_code`, `benchmark_ticker`
+  (`^N225` / `^GSPC`), `benchmark_name`, `state_dir` (where paper trading
+  state is persisted — relative paths resolve to the project root)
+- **watchlist** - Array of ticker symbols (use `.T` suffix for TSE, raw
+  symbols for US — e.g. `AAPL`, `MSFT`)
 - **strategy.params** - Indicator periods and thresholds
-- **backtest** - Capital, position sizing, stop loss / take profit
-- **monitor** - Polling interval and trading hours
-- **line** - LINE Messaging API alert settings
+- **backtest** - Capital, position sizing, stop loss / take profit, plus
+  `shares_per_lot` (100 for JP round lots, 1 for US)
+- **monitor** - Polling interval, trading hours, and `timezone`
+  (`Asia/Tokyo` / `America/New_York`)
+- **ml.model_name** - Filename stem under `models/` so JP and US don't
+  overwrite each other (`default` → `models/default.pkl`, `us` →
+  `models/us.pkl`)
+- **line** - LINE Messaging API alert settings (the same LINE channel can
+  be reused across markets — alerts are prefixed with `[JP]` / `[US]`)
 
 ## LINE Alerts Setup
 

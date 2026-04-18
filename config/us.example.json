@@ -1,0 +1,135 @@
+{
+  "market": {
+    "name": "US",
+    "currency_symbol": "$",
+    "currency_code": "USD",
+    "benchmark_ticker": "^GSPC",
+    "benchmark_name": "S&P 500",
+    "state_dir": "paper_trading_us"
+  },
+  "watchlist": [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AVGO", "ORCL", "CRM",
+    "ADBE", "NFLX", "AMD", "INTC", "CSCO", "QCOM", "TXN", "MU", "AMAT", "LRCX",
+    "NOW", "PLTR", "SNOW", "UBER", "ABNB", "SHOP", "SQ", "PYPL", "SPOT", "ROKU",
+    "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "SCHW", "AXP", "V",
+    "MA", "USB", "PNC", "COF", "ICE",
+    "BRK-B", "BMY", "JNJ", "PFE", "MRK", "ABBV", "LLY", "TMO", "ABT", "DHR",
+    "UNH", "CVS", "GILD", "AMGN", "REGN",
+    "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX",
+    "WMT", "COST", "TGT", "HD", "LOW", "NKE", "SBUX", "MCD", "CMG", "DIS",
+    "PG", "KO", "PEP", "PM", "MO", "CL",
+    "BA", "GE", "CAT", "DE", "HON", "LMT", "RTX", "NOC", "MMM",
+    "T", "VZ", "TMUS", "CMCSA",
+    "F", "GM", "RIVN", "LCID",
+    "COIN", "HOOD", "SOFI"
+  ],
+  "watchlist_names": {
+    "AAPL": "Apple", "MSFT": "Microsoft", "GOOGL": "Alphabet", "AMZN": "Amazon",
+    "META": "Meta Platforms", "NVDA": "NVIDIA", "TSLA": "Tesla", "AVGO": "Broadcom",
+    "ORCL": "Oracle", "CRM": "Salesforce", "ADBE": "Adobe", "NFLX": "Netflix",
+    "AMD": "AMD", "INTC": "Intel", "CSCO": "Cisco", "QCOM": "Qualcomm",
+    "TXN": "Texas Instruments", "MU": "Micron", "AMAT": "Applied Materials",
+    "LRCX": "Lam Research", "NOW": "ServiceNow", "PLTR": "Palantir",
+    "SNOW": "Snowflake", "UBER": "Uber", "ABNB": "Airbnb", "SHOP": "Shopify",
+    "SQ": "Block", "PYPL": "PayPal", "SPOT": "Spotify", "ROKU": "Roku",
+    "JPM": "JPMorgan Chase", "BAC": "Bank of America", "WFC": "Wells Fargo",
+    "C": "Citigroup", "GS": "Goldman Sachs", "MS": "Morgan Stanley",
+    "BLK": "BlackRock", "SCHW": "Charles Schwab", "AXP": "American Express",
+    "V": "Visa", "MA": "Mastercard", "USB": "U.S. Bancorp", "PNC": "PNC Financial",
+    "COF": "Capital One", "ICE": "Intercontinental Exchange",
+    "BRK-B": "Berkshire Hathaway", "BMY": "Bristol Myers Squibb",
+    "JNJ": "Johnson & Johnson", "PFE": "Pfizer", "MRK": "Merck", "ABBV": "AbbVie",
+    "LLY": "Eli Lilly", "TMO": "Thermo Fisher", "ABT": "Abbott Laboratories",
+    "DHR": "Danaher", "UNH": "UnitedHealth", "CVS": "CVS Health",
+    "GILD": "Gilead Sciences", "AMGN": "Amgen", "REGN": "Regeneron",
+    "XOM": "Exxon Mobil", "CVX": "Chevron", "COP": "ConocoPhillips",
+    "SLB": "Schlumberger", "EOG": "EOG Resources", "MPC": "Marathon Petroleum",
+    "PSX": "Phillips 66",
+    "WMT": "Walmart", "COST": "Costco", "TGT": "Target", "HD": "Home Depot",
+    "LOW": "Lowe's", "NKE": "Nike", "SBUX": "Starbucks", "MCD": "McDonald's",
+    "CMG": "Chipotle", "DIS": "Disney", "PG": "Procter & Gamble", "KO": "Coca-Cola",
+    "PEP": "PepsiCo", "PM": "Philip Morris", "MO": "Altria", "CL": "Colgate-Palmolive",
+    "BA": "Boeing", "GE": "General Electric", "CAT": "Caterpillar", "DE": "Deere",
+    "HON": "Honeywell", "LMT": "Lockheed Martin", "RTX": "RTX", "NOC": "Northrop Grumman",
+    "MMM": "3M",
+    "T": "AT&T", "VZ": "Verizon", "TMUS": "T-Mobile", "CMCSA": "Comcast",
+    "F": "Ford", "GM": "General Motors", "RIVN": "Rivian", "LCID": "Lucid",
+    "COIN": "Coinbase", "HOOD": "Robinhood", "SOFI": "SoFi Technologies"
+  },
+  "strategy": {
+    "name": "swing_composite",
+    "params": {
+      "sma_short": 5,
+      "sma_long": 25,
+      "rsi_period": 14,
+      "rsi_oversold": 30,
+      "rsi_overbought": 70,
+      "macd_fast": 12,
+      "macd_slow": 26,
+      "macd_signal": 9,
+      "bb_period": 20,
+      "bb_std": 2.0,
+      "volume_sma_period": 20,
+      "volume_spike_threshold": 1.5,
+      "ichimoku_tenkan": 9,
+      "ichimoku_kijun": 26,
+      "ichimoku_senkou_b": 52,
+      "mfi_period": 14,
+      "adx_period": 14,
+      "rs_period": 20,
+      "signal_threshold": 4,
+      "strong_signal_threshold": 7,
+      "indicator_weights": {
+        "sma": 1.5,
+        "rsi": 1.5,
+        "macd": 2.0,
+        "bollinger": 1.0,
+        "volume": 1.0,
+        "ichimoku": 2.5,
+        "mfi": 2.0,
+        "adx": 2.0,
+        "relative_strength": 2.5,
+        "ml": 3.0,
+        "sentiment": 2.5
+      }
+    }
+  },
+  "backtest": {
+    "initial_capital": 10000,
+    "commission_rate": 0.0,
+    "position_size_pct": 0.1,
+    "max_positions": 5,
+    "stop_loss_pct": 0.05,
+    "take_profit_pct": 0.15,
+    "lookback_days": 365,
+    "shares_per_lot": 1
+  },
+  "monitor": {
+    "interval_seconds": 60,
+    "trading_hours_start": "09:30",
+    "trading_hours_end": "16:00",
+    "timezone": "America/New_York"
+  },
+  "llm_sentiment": {
+    "enabled": false,
+    "api_key": "",
+    "model": "gpt-4o-mini"
+  },
+  "ml": {
+    "forward_days": 5,
+    "threshold": 0.03,
+    "model_name": "us",
+    "model_params": {
+      "n_estimators": 200,
+      "max_depth": 4,
+      "learning_rate": 0.05,
+      "subsample": 0.8,
+      "min_samples_leaf": 20
+    }
+  },
+  "line": {
+    "enabled": false,
+    "channel_access_token": "",
+    "user_id": ""
+  }
+}

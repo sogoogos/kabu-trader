@@ -34,12 +34,21 @@ class Monitor:
         self.names = names or {}
         self.strategy_params = config["strategy"]["params"]
         self.monitor_config = config["monitor"]
-        self.fetcher = DataFetcher()
-        self.strategy = SwingCompositeStrategy(self.strategy_params)
+        market_config = config.get("market", {})
+        self.currency_symbol = market_config.get("currency_symbol", "¥")
+        self.benchmark_name = market_config.get("benchmark_name", "Nikkei 225")
+        self.market_name = market_config.get("name", "JP")
+        benchmark_ticker = market_config.get("benchmark_ticker", "^N225")
+        self.fetcher = DataFetcher(benchmark_ticker=benchmark_ticker)
+        self.strategy = SwingCompositeStrategy(self.strategy_params, self.benchmark_name)
         self.console = Console()
         self.alerts: List[dict] = []
         self.tz = ZoneInfo(self.monitor_config["timezone"])
-        self.line = LineNotifier(config.get("line", {}))
+        self.line = LineNotifier(
+            config.get("line", {}),
+            currency_symbol=self.currency_symbol,
+            market_name=self.market_name,
+        )
         self.llm = LLMSentimentAnalyzer(config.get("llm_sentiment", {}))
         self.config = config
         self._sent_signals: set = set()  # track sent alerts to avoid duplicates
@@ -107,10 +116,11 @@ class Monitor:
                         signal_str = sig
                     break
 
+            sym = self.currency_symbol
             table.add_row(
                 ticker,
                 name,
-                f"¥{p['price']:,.0f}" if p["price"] else "N/A",
+                f"{sym}{p['price']:,.2f}" if p["price"] else "N/A",
                 change_str,
                 f"{p['volume']:,.0f}" if p.get("volume") else "N/A",
                 signal_str,
@@ -133,9 +143,10 @@ class Monitor:
                 color = "yellow"
 
             name = self.names.get(alert["ticker"], alert["ticker"])
+            sym = self.currency_symbol
             lines.append(
                 f"[{color}][{alert['time']}] {sig} {name} ({alert['ticker']}) "
-                f"@ ¥{alert['price']:,.0f} (score: {alert['score']})[/{color}]"
+                f"@ {sym}{alert['price']:,.2f} (score: {alert['score']})[/{color}]"
             )
             for reason in alert.get("reasons", []):
                 lines.append(f"  [dim]- {reason}[/dim]")
@@ -182,13 +193,15 @@ class Monitor:
             ml_config = self.config.get("ml", {})
 
             data = self.fetcher.fetch_multiple(self.watchlist, days=730)
-            nikkei_df = self.fetcher.fetch_nikkei225(days=730)
+            benchmark_df = self.fetcher.fetch_benchmark(days=730)
+            model_name = ml_config.get("model_name", "default")
 
             model, metrics = train_final_model(
-                data, params, nikkei_df,
+                data, params, benchmark_df,
                 forward_days=ml_config.get("forward_days", 5),
                 threshold=ml_config.get("threshold", 0.03),
                 ml_params=ml_config.get("model_params"),
+                save_name=model_name,
             )
 
             self.strategy.set_ml_model(model)
@@ -290,8 +303,8 @@ class Monitor:
         """Fetch recent data and analyze signals for all watchlist stocks."""
         self.alerts = []
         self._refresh_sentiment()
-        nikkei_df = self.fetcher.fetch_nikkei225(days=60)
-        self.strategy.set_nikkei_data(nikkei_df)
+        benchmark_df = self.fetcher.fetch_benchmark(days=60)
+        self.strategy.set_benchmark_data(benchmark_df)
         data = self.fetcher.fetch_multiple(self.watchlist, days=60, interval="1d")
 
         for ticker, df in data.items():
@@ -339,20 +352,21 @@ class Monitor:
 
         # Check stop loss / take profit first
         sl_tp_actions = self.paper_trader.check_stop_loss_take_profit(price_dict, now_str)
+        sym = self.currency_symbol
         for action in sl_tp_actions:
             pnl = action["pnl"]
             color = "green" if pnl > 0 else "red"
             self.console.print(
                 f"[bold {color}]PAPER {action['action']}: {action['name']} ({action['ticker']}) "
-                f"@ ¥{action['price']:,.0f} | {action['reason']} | "
-                f"P&L: ¥{pnl:+,.0f} ({action['pnl_pct']:+.1f}%)[/bold {color}]"
+                f"@ {sym}{action['price']:,.2f} | {action['reason']} | "
+                f"P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)[/bold {color}]"
             )
             # Send LINE for stop loss / take profit
             if self.line.enabled:
                 msg = (
-                    f"📋 Trade: {action['reason'].upper()} [🧪 PAPER]\n"
+                    f"📋 [{self.market_name}] Trade: {action['reason'].upper()} [🧪 PAPER]\n"
                     f"{'🟢' if pnl > 0 else '🔴'} SELL {action['name']}\n"
-                    f"💰 ¥{action['price']:,.0f} → P&L: ¥{pnl:+,.0f} ({action['pnl_pct']:+.1f}%)"
+                    f"💰 {sym}{action['price']:,.2f} → P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)"
                 )
                 self.line.send(msg)
 
@@ -374,7 +388,7 @@ class Monitor:
                 if action["action"] == "BUY":
                     self.console.print(
                         f"[bold green]PAPER BUY: {name} ({ticker}) "
-                        f"{action['shares']} shares @ ¥{price:,.0f} "
+                        f"{action['shares']} shares @ {sym}{price:,.2f} "
                         f"(score: {action['score']})[/bold green]"
                     )
                 elif action["action"] == "SELL":
@@ -382,7 +396,7 @@ class Monitor:
                     color = "green" if pnl > 0 else "red"
                     self.console.print(
                         f"[bold {color}]PAPER SELL: {name} ({ticker}) "
-                        f"@ ¥{price:,.0f} | P&L: ¥{pnl:+,.0f} "
+                        f"@ {sym}{price:,.2f} | P&L: {sym}{pnl:+,.2f} "
                         f"({action['pnl_pct']:+.1f}%)[/bold {color}]"
                     )
 
@@ -399,11 +413,12 @@ class Monitor:
 
         ret = summary["total_return_pct"]
         ret_color = "green" if ret > 0 else "red" if ret < 0 else "white"
+        sym = self.currency_symbol
 
         lines = [
-            f"Capital: ¥{summary['initial_capital']:,.0f} → ¥{summary['total_value']:,.0f} "
+            f"Capital: {sym}{summary['initial_capital']:,.2f} → {sym}{summary['total_value']:,.2f} "
             f"[{ret_color}]({ret:+.2f}%)[/{ret_color}]",
-            f"Cash: ¥{summary['cash']:,.0f} | Positions: {summary['open_positions']}/{self.paper_trader.max_positions}",
+            f"Cash: {sym}{summary['cash']:,.2f} | Positions: {summary['open_positions']}/{self.paper_trader.max_positions}",
             f"Trades: {summary['total_closed_trades']} closed "
             f"(Win: {summary['winning_trades']} / Loss: {summary['losing_trades']} | "
             f"Rate: {summary['win_rate']:.0f}%)",
@@ -421,8 +436,8 @@ class Monitor:
                 color = "green" if pnl > 0 else "red"
                 lines.append(
                     f"  [{color}]{pos.name} ({ticker}): "
-                    f"{pos.shares} shares @ ¥{pos.entry_price:,.0f} → ¥{price:,.0f} "
-                    f"(¥{pnl:+,.0f} / {pnl_pct:+.1f}%)[/{color}]"
+                    f"{pos.shares} shares @ {sym}{pos.entry_price:,.2f} → {sym}{price:,.2f} "
+                    f"({sym}{pnl:+,.2f} / {pnl_pct:+.1f}%)[/{color}]"
                 )
 
         return Panel("\n".join(lines), title="Paper Trading", border_style="bold cyan")
@@ -453,12 +468,13 @@ class Monitor:
         """Run continuous monitoring loop."""
         interval = self.monitor_config["interval_seconds"]
 
+        tz_label = str(self.tz).split("/")[-1] if "/" in str(self.tz) else str(self.tz)
         self.console.print(Panel(
-            f"Monitoring {len(self.watchlist)} stocks every {interval}s\n"
+            f"Monitoring {len(self.watchlist)} [{self.market_name}] stocks every {interval}s\n"
             f"Trading hours: {self.monitor_config['trading_hours_start']} - "
-            f"{self.monitor_config['trading_hours_end']} JST\n"
+            f"{self.monitor_config['trading_hours_end']} {tz_label}\n"
             f"Press Ctrl+C to stop",
-            title="Kabu Trader Monitor",
+            title=f"Kabu Trader Monitor [{self.market_name}]",
             border_style="bold blue",
         ))
 

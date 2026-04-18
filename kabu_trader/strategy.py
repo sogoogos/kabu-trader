@@ -54,7 +54,7 @@ class SwingCompositeStrategy:
         6. Ichimoku Cloud (trend + support/resistance)
         7. Money Flow Index (volume-weighted buying pressure)
         8. ADX (trend strength filter)
-        9. Relative Strength vs Nikkei 225 (outperformance)
+        9. Relative Strength vs market benchmark (Nikkei 225, S&P 500, ...)
     """
 
     # Default weights based on ML feature importance analysis.
@@ -74,9 +74,10 @@ class SwingCompositeStrategy:
         "sentiment": 2.5,
     }
 
-    def __init__(self, params: dict):
+    def __init__(self, params: dict, benchmark_name: str = "Nikkei"):
         self.params = params
-        self.nikkei_df = None
+        self.benchmark_df = None
+        self.benchmark_name = benchmark_name
         self.ml_model = None
         self.sentiment_data: dict = {}  # ticker -> sentiment result
 
@@ -85,9 +86,9 @@ class SwingCompositeStrategy:
         self.weights = dict(self.DEFAULT_WEIGHTS)
         self.weights.update(user_weights)
 
-    def set_nikkei_data(self, nikkei_df):
-        """Set Nikkei 225 data for relative strength calculation."""
-        self.nikkei_df = nikkei_df
+    def set_benchmark_data(self, benchmark_df):
+        """Set market benchmark data (Nikkei, S&P 500, ...) for relative strength."""
+        self.benchmark_df = benchmark_df
 
     def set_ml_model(self, ml_model):
         """Set trained ML model for prediction scoring."""
@@ -107,7 +108,7 @@ class SwingCompositeStrategy:
         Returns:
             List of TradeSignal for rows that have actionable signals
         """
-        df = indicators.compute_all(df, self.params, self.nikkei_df)
+        df = indicators.compute_all(df, self.params, self.benchmark_df)
         df = self._add_ml_predictions(df)
         signals = []
 
@@ -135,7 +136,7 @@ class SwingCompositeStrategy:
 
     def get_latest_signal(self, df: pd.DataFrame, ticker: str = "") -> TradeSignal:
         """Get signal for the most recent data point."""
-        df = indicators.compute_all(df, self.params, self.nikkei_df)
+        df = indicators.compute_all(df, self.params, self.benchmark_df)
         df = self._add_ml_predictions(df)
         score, reasons = self._score_row(df, len(df) - 1, ticker)
 
@@ -381,18 +382,19 @@ class SwingCompositeStrategy:
             return -intensity, f"ADX strong trend ({adx_val:.0f}) — confirmed downtrend"
 
     def _score_relative_strength(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
-        rs = df["RS_vs_Nikkei"].iloc[i]
+        rs = df["RS_vs_Benchmark"].iloc[i]
         if pd.isna(rs):
             return 0, ""
 
+        bench = self.benchmark_name
         if rs > 1.10:
-            return 1.0, f"Outperforming Nikkei by {(rs-1)*100:.0f}% — strong"
+            return 1.0, f"Outperforming {bench} by {(rs-1)*100:.0f}% — strong"
         if rs > 1.03:
-            return 0.5, f"Outperforming Nikkei by {(rs-1)*100:.0f}%"
+            return 0.5, f"Outperforming {bench} by {(rs-1)*100:.0f}%"
         if rs < 0.90:
-            return -1.0, f"Underperforming Nikkei by {(1-rs)*100:.0f}% — weak"
+            return -1.0, f"Underperforming {bench} by {(1-rs)*100:.0f}% — weak"
         if rs < 0.97:
-            return -0.5, f"Underperforming Nikkei by {(1-rs)*100:.0f}%"
+            return -0.5, f"Underperforming {bench} by {(1-rs)*100:.0f}%"
 
         return 0, ""
 
@@ -409,7 +411,7 @@ class SwingCompositeStrategy:
             # We need to engineer features on the original OHLCV data
             # But df already has indicators added. Extract OHLCV and re-engineer.
             ohlcv = df[["Open", "High", "Low", "Close", "Volume"]].copy()
-            featured = engineer_features(ohlcv, self.params, self.nikkei_df)
+            featured = engineer_features(ohlcv, self.params, self.benchmark_df)
 
             feature_cols = get_feature_columns()
             available = [c for c in feature_cols if c in featured.columns]

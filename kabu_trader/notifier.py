@@ -14,9 +14,11 @@ LINE_API_URL = "https://api.line.me/v2/bot/message/push"
 class LineNotifier:
     """Sends alerts via LINE Messaging API (free tier: 200 messages/month)."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, currency_symbol: str = "¥", market_name: str = "JP"):
         self.enabled = config.get("enabled", False)
         self.paper_mode = False
+        self.currency_symbol = currency_symbol
+        self.market_name = market_name
         if not self.enabled:
             return
 
@@ -73,11 +75,11 @@ class LineNotifier:
 
         mode_tag = "🧪 PAPER TEST" if self.paper_mode else "💹 LIVE"
         lines = [
-            f"📊 Kabu Trader Alert [{mode_tag}]",
+            f"📊 Kabu Trader [{self.market_name}] Alert [{mode_tag}]",
             f"",
             f"{'🟢' if 'BUY' in signal else '🔴'} {signal}",
             f"📌 {label}",
-            f"💰 ¥{price:,.0f}",
+            f"💰 {self.currency_symbol}{price:,.2f}",
             f"📈 Score: {score}",
         ]
         if reasons:

@@ -144,7 +144,7 @@ class MLPredictor:
 def walk_forward_evaluate(
     data: Dict[str, pd.DataFrame],
     params: dict,
-    nikkei_df: pd.DataFrame = None,
+    benchmark_df: pd.DataFrame = None,
     n_splits: int = 5,
     forward_days: int = 5,
     threshold: float = 0.03,
@@ -162,7 +162,7 @@ def walk_forward_evaluate(
     Returns:
         Dict with per-fold and aggregate metrics
     """
-    X, y = prepare_dataset(data, params, nikkei_df, forward_days, threshold)
+    X, y = prepare_dataset(data, params, benchmark_df, forward_days, threshold)
 
     if len(X) < 200:
         return {"error": f"Not enough data ({len(X)} samples). Need at least 200."}
@@ -238,7 +238,7 @@ def walk_forward_evaluate(
 def train_final_model(
     data: Dict[str, pd.DataFrame],
     params: dict,
-    nikkei_df: pd.DataFrame = None,
+    benchmark_df: pd.DataFrame = None,
     forward_days: int = 5,
     threshold: float = 0.03,
     ml_params: dict = None,
@@ -249,7 +249,7 @@ def train_final_model(
     Returns:
         Tuple of (trained model, training metrics)
     """
-    X, y = prepare_dataset(data, params, nikkei_df, forward_days, threshold)
+    X, y = prepare_dataset(data, params, benchmark_df, forward_days, threshold)
 
     if len(X) < 100:
         raise ValueError(f"Not enough data ({len(X)} samples). Need at least 100.")
