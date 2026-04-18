@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=45"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kabu-trader"
+version = "0.1.0"
+description = "Japanese Stock Swing Trading System"
+requires-python = ">=3.9"
+dependencies = [
+    "yfinance>=0.2.31",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "ta>=0.11.0",
+    "rich>=13.0.0",
+    "schedule>=1.2.0",
+]
+
+[project.scripts]
+kabu-trader = "kabu_trader.cli:main"
