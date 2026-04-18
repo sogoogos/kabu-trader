@@ -23,6 +23,7 @@ from .data_fetcher import DataFetcher
 from .strategy import SwingCompositeStrategy, Signal
 from .notifier import LineNotifier
 from .llm_sentiment import LLMSentimentAnalyzer
+from .paper_trader import PaperTrader
 
 
 class Monitor:
@@ -43,6 +44,7 @@ class Monitor:
         self._sent_signals: set = set()  # track sent alerts to avoid duplicates
         self._last_sentiment_time: float = 0  # timestamp of last sentiment refresh
         self._seen_headlines: set = set()  # track seen news headlines
+        self.paper_trader: Optional[PaperTrader] = None
 
     def _is_trading_hours(self) -> bool:
         now = datetime.now(self.tz)
@@ -263,6 +265,106 @@ class Monitor:
                     self._sent_signals.add(key)
                     self.console.print(f"[bold yellow]LINE sent for {alert['ticker']}[/bold yellow]")
 
+    def _execute_paper_trades(self, prices: list):
+        """Execute paper trades based on current signals and prices."""
+        if not self.paper_trader:
+            return
+
+        now_str = datetime.now(self.tz).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Build price dict
+        price_dict = {p["ticker"]: p["price"] for p in prices if p.get("price")}
+
+        # Check stop loss / take profit first
+        sl_tp_actions = self.paper_trader.check_stop_loss_take_profit(price_dict, now_str)
+        for action in sl_tp_actions:
+            pnl = action["pnl"]
+            color = "green" if pnl > 0 else "red"
+            self.console.print(
+                f"[bold {color}]PAPER {action['action']}: {action['name']} ({action['ticker']}) "
+                f"@ ¥{action['price']:,.0f} | {action['reason']} | "
+                f"P&L: ¥{pnl:+,.0f} ({action['pnl_pct']:+.1f}%)[/bold {color}]"
+            )
+            # Send LINE for stop loss / take profit
+            if self.line.enabled:
+                msg = (
+                    f"📋 Paper Trade: {action['reason'].upper()}\n"
+                    f"{'🟢' if pnl > 0 else '🔴'} SELL {action['name']}\n"
+                    f"💰 ¥{action['price']:,.0f} → P&L: ¥{pnl:+,.0f} ({action['pnl_pct']:+.1f}%)"
+                )
+                self.line.send(msg)
+
+        # Process signals
+        for alert in self.alerts:
+            ticker = alert["ticker"]
+            price = price_dict.get(ticker, 0)
+            if price <= 0:
+                continue
+
+            name = self.names.get(ticker, ticker)
+            action = self.paper_trader.process_signal(
+                ticker=ticker, name=name, signal=alert["signal"],
+                score=alert["score"], price=price, reasons=alert["reasons"],
+                timestamp=now_str,
+            )
+
+            if action:
+                if action["action"] == "BUY":
+                    self.console.print(
+                        f"[bold green]PAPER BUY: {name} ({ticker}) "
+                        f"{action['shares']} shares @ ¥{price:,.0f} "
+                        f"(score: {action['score']})[/bold green]"
+                    )
+                elif action["action"] == "SELL":
+                    pnl = action["pnl"]
+                    color = "green" if pnl > 0 else "red"
+                    self.console.print(
+                        f"[bold {color}]PAPER SELL: {name} ({ticker}) "
+                        f"@ ¥{price:,.0f} | P&L: ¥{pnl:+,.0f} "
+                        f"({action['pnl_pct']:+.1f}%)[/bold {color}]"
+                    )
+
+        # Daily snapshot
+        self.paper_trader.take_daily_snapshot(price_dict, now_str)
+
+    def _build_paper_panel(self, prices: list) -> Panel:
+        """Build paper trading status panel."""
+        if not self.paper_trader:
+            return Panel("[dim]Paper trading disabled[/dim]", title="Paper Trading", border_style="dim")
+
+        price_dict = {p["ticker"]: p["price"] for p in prices if p.get("price")}
+        summary = self.paper_trader.get_summary(price_dict)
+
+        ret = summary["total_return_pct"]
+        ret_color = "green" if ret > 0 else "red" if ret < 0 else "white"
+
+        lines = [
+            f"Capital: ¥{summary['initial_capital']:,.0f} → ¥{summary['total_value']:,.0f} "
+            f"[{ret_color}]({ret:+.2f}%)[/{ret_color}]",
+            f"Cash: ¥{summary['cash']:,.0f} | Positions: {summary['open_positions']}/{self.paper_trader.max_positions}",
+            f"Trades: {summary['total_closed_trades']} closed "
+            f"(Win: {summary['winning_trades']} / Loss: {summary['losing_trades']} | "
+            f"Rate: {summary['win_rate']:.0f}%)",
+            f"Running: {summary['days_running']} day(s)",
+        ]
+
+        # Show open positions
+        if self.paper_trader.positions:
+            lines.append("")
+            lines.append("[bold]Open positions:[/bold]")
+            for ticker, pos in self.paper_trader.positions.items():
+                price = price_dict.get(ticker, pos.entry_price)
+                pnl = pos.pnl(price)
+                pnl_pct = pos.pnl_pct(price)
+                color = "green" if pnl > 0 else "red"
+                lines.append(
+                    f"  [{color}]{pos.name} ({ticker}): "
+                    f"{pos.shares} shares @ ¥{pos.entry_price:,.0f} → ¥{price:,.0f} "
+                    f"(¥{pnl:+,.0f} / {pnl_pct:+.1f}%)[/{color}]"
+                )
+
+        return Panel("\n".join(lines), title="Paper Trading", border_style="bold cyan")
+
     def run_once(self):
         """Run a single monitoring cycle and print results."""
         self.console.print("\n[bold]Fetching data...[/bold]")
@@ -272,10 +374,15 @@ class Monitor:
 
         prices = self.fetcher.fetch_current_prices(self.watchlist)
 
+        # Execute paper trades
+        self._execute_paper_trades(prices)
+
         self.console.print()
         self.console.print(self._build_price_table(prices))
         self.console.print()
         self.console.print(self._build_alerts_panel())
+        self.console.print()
+        self.console.print(self._build_paper_panel(prices))
 
         now = datetime.now(self.tz).strftime("%Y-%m-%d %H:%M:%S %Z")
         self.console.print(f"\n[dim]Last updated: {now}[/dim]")
@@ -298,9 +405,12 @@ class Monitor:
                 if self._is_trading_hours():
                     self.run_once()
                 else:
+                    # Outside market hours: still check for breaking news
+                    self._check_breaking_news()
+                    self._refresh_sentiment()
                     now = datetime.now(self.tz).strftime("%H:%M:%S")
                     self.console.print(
-                        f"[dim][{now}] Market closed. Waiting...[/dim]"
+                        f"[dim][{now}] Market closed. Watching for news...[/dim]"
                     )
 
                 time.sleep(interval)

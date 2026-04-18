@@ -144,10 +144,145 @@ def cmd_monitor(args):
         monitor.strategy.set_ml_model(ml)
         console.print("[bold green]ML model loaded[/bold green]")
 
+    # Enable paper trading
+    if args.paper:
+        from .paper_trader import PaperTrader
+        monitor.paper_trader = PaperTrader(config["backtest"])
+        summary = monitor.paper_trader.get_summary()
+        console.print(Panel(
+            f"Paper trading enabled\n"
+            f"Capital: ¥{summary['initial_capital']:,.0f} | "
+            f"Current: ¥{summary['total_value']:,.0f} ({summary['total_return_pct']:+.2f}%)\n"
+            f"Open positions: {summary['open_positions']} | "
+            f"Closed trades: {summary['total_closed_trades']}",
+            title="Paper Trading",
+            border_style="bold cyan",
+        ))
+
     if args.once:
         monitor.run_once()
     else:
         monitor.run_continuous()
+
+
+def cmd_report(args):
+    """Show paper trading report."""
+    from .paper_trader import PaperTrader
+
+    config = load_config(args.config)
+    names = config.get("watchlist_names", {})
+    trader = PaperTrader(config["backtest"])
+
+    if args.reset:
+        trader.reset()
+        console.print("[bold]Paper trading state reset.[/bold]")
+        return
+
+    # Fetch current prices for open positions
+    fetcher = DataFetcher()
+    price_dict = {}
+    if trader.positions:
+        tickers = list(trader.positions.keys())
+        for p in fetcher.fetch_current_prices(tickers):
+            price_dict[p["ticker"]] = p["price"]
+
+    summary = trader.get_summary(price_dict)
+
+    # Header
+    ret = summary["total_return_pct"]
+    ret_color = "green" if ret > 0 else "red"
+    console.print(Panel(
+        f"Initial: ¥{summary['initial_capital']:,.0f}\n"
+        f"Current: ¥{summary['total_value']:,.0f} [{ret_color}]({ret:+.2f}%)[/{ret_color}]\n"
+        f"Cash: ¥{summary['cash']:,.0f}\n"
+        f"Days running: {summary['days_running']}\n"
+        f"Closed trades: {summary['total_closed_trades']} "
+        f"(W: {summary['winning_trades']} / L: {summary['losing_trades']} | "
+        f"Win rate: {summary['win_rate']:.0f}%)\n"
+        f"Total realized P&L: ¥{summary['total_pnl']:+,.0f}",
+        title="Paper Trading Report",
+        border_style="bold cyan",
+    ))
+
+    # Open positions
+    if trader.positions:
+        pos_table = Table(title="Open Positions", show_header=True, header_style="bold cyan")
+        pos_table.add_column("Ticker", style="bold")
+        pos_table.add_column("Name", style="dim")
+        pos_table.add_column("Shares", justify="right")
+        pos_table.add_column("Entry", justify="right")
+        pos_table.add_column("Current", justify="right")
+        pos_table.add_column("P&L", justify="right")
+        pos_table.add_column("P&L %", justify="right")
+        pos_table.add_column("Held Since")
+
+        for ticker, pos in trader.positions.items():
+            price = price_dict.get(ticker, pos.entry_price)
+            pnl = pos.pnl(price)
+            pnl_pct = pos.pnl_pct(price)
+            color = "green" if pnl > 0 else "red"
+
+            pos_table.add_row(
+                ticker, pos.name, str(pos.shares),
+                f"¥{pos.entry_price:,.0f}", f"¥{price:,.0f}",
+                f"[{color}]¥{pnl:+,.0f}[/{color}]",
+                f"[{color}]{pnl_pct:+.1f}%[/{color}]",
+                pos.entry_date[:10],
+            )
+
+        console.print()
+        console.print(pos_table)
+
+    # Trade log
+    if trader.trade_log:
+        log_table = Table(title="Trade Log", show_header=True, header_style="bold cyan")
+        log_table.add_column("Date", style="dim")
+        log_table.add_column("Action", justify="center")
+        log_table.add_column("Ticker", style="bold")
+        log_table.add_column("Name")
+        log_table.add_column("Price", justify="right")
+        log_table.add_column("Shares", justify="right")
+        log_table.add_column("P&L", justify="right")
+        log_table.add_column("Reason")
+
+        for trade in trader.trade_log[-20:]:  # Last 20 trades
+            action = trade["action"]
+            action_str = f"[green]{action}[/green]" if action == "BUY" else f"[red]{action}[/red]"
+            pnl_str = ""
+            reason = ""
+
+            if action == "SELL":
+                pnl = trade.get("pnl", 0)
+                pnl_pct = trade.get("pnl_pct", 0)
+                color = "green" if pnl > 0 else "red"
+                pnl_str = f"[{color}]¥{pnl:+,.0f} ({pnl_pct:+.1f}%)[/{color}]"
+                reason = trade.get("reason", "")
+            else:
+                reason = f"score: {trade.get('score', '')}"
+
+            log_table.add_row(
+                trade["timestamp"][:16], action_str,
+                trade["ticker"], trade["name"],
+                f"¥{trade['price']:,.0f}", str(trade["shares"]),
+                pnl_str, reason,
+            )
+
+        console.print()
+        console.print(log_table)
+
+    # Daily equity curve
+    if trader.daily_snapshots:
+        console.print("\n[bold]Daily Equity:[/bold]")
+        for snap in trader.daily_snapshots[-14:]:  # Last 2 weeks
+            ret_val = snap["return_pct"]
+            bar_len = int(abs(ret_val) * 5)
+            if ret_val > 0:
+                bar = f"[green]{'█' * bar_len} {ret_val:+.2f}%[/green]"
+            elif ret_val < 0:
+                bar = f"[red]{'█' * bar_len} {ret_val:+.2f}%[/red]"
+            else:
+                bar = f"{ret_val:+.2f}%"
+            console.print(f"  {snap['date'][:10]} ¥{snap['total']:>12,.0f} {bar}")
 
 
 def cmd_sentiment(args):
@@ -390,6 +525,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  %(prog)s monitor --paper              Start monitor with paper trading
+  %(prog)s monitor --paper --once      Run single cycle with paper trading
+  %(prog)s report                      Show paper trading results
+  %(prog)s report --reset              Reset paper trading state
   %(prog)s sentiment                    Analyze news sentiment via LLM
   %(prog)s sentiment -t 7203.T         Analyze specific stocks
   %(prog)s train                       Train ML model on all watchlist stocks
@@ -432,7 +571,13 @@ Examples:
     # Monitor
     mo = subparsers.add_parser("monitor", help="Real-time price monitor")
     mo.add_argument("--once", action="store_true", help="Run single cycle")
+    mo.add_argument("--paper", action="store_true", help="Enable paper trading (dry run)")
     mo.set_defaults(func=cmd_monitor)
+
+    # Report
+    rp = subparsers.add_parser("report", help="Show paper trading report")
+    rp.add_argument("--reset", action="store_true", help="Reset paper trading state")
+    rp.set_defaults(func=cmd_report)
 
     args = parser.parse_args()
 

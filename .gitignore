@@ -13,6 +13,9 @@ venv/
 # Trained models (large binary files)
 models/*.pkl
 
+# Paper trading state (contains your simulated portfolio)
+paper_trading/
+
 # IDE
 .vscode/
 .idea/
