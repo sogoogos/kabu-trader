@@ -41,8 +41,10 @@ class Monitor:
         self.tz = ZoneInfo(self.monitor_config["timezone"])
         self.line = LineNotifier(config.get("line", {}))
         self.llm = LLMSentimentAnalyzer(config.get("llm_sentiment", {}))
+        self.config = config
         self._sent_signals: set = set()  # track sent alerts to avoid duplicates
         self._last_sentiment_time: float = 0  # timestamp of last sentiment refresh
+        self._last_retrain_week: int = -1  # ISO week number of last retrain
         self._seen_headlines: set = set()  # track seen news headlines
         self.paper_trader: Optional[PaperTrader] = None
 
@@ -157,6 +159,58 @@ class Monitor:
         self.console.print(
             f"[bold green]Sentiment updated for {len(sentiment_data)} stocks[/bold green]"
         )
+
+    def _auto_retrain(self):
+        """Retrain ML model once per week (Sunday night)."""
+        now = datetime.now(self.tz)
+
+        # Only retrain on Sundays after 20:00
+        if now.weekday() != 6 or now.hour < 20:
+            return
+
+        # Only retrain once per ISO week
+        current_week = now.isocalendar()[1]
+        if current_week == self._last_retrain_week:
+            return
+
+        self.console.print("[bold magenta]Auto-retraining ML model (weekly)...[/bold magenta]")
+
+        try:
+            from .ml_model import train_final_model
+
+            params = self.config["strategy"]["params"]
+            ml_config = self.config.get("ml", {})
+
+            data = self.fetcher.fetch_multiple(self.watchlist, days=730)
+            nikkei_df = self.fetcher.fetch_nikkei225(days=730)
+
+            model, metrics = train_final_model(
+                data, params, nikkei_df,
+                forward_days=ml_config.get("forward_days", 5),
+                threshold=ml_config.get("threshold", 0.03),
+                ml_params=ml_config.get("model_params"),
+            )
+
+            self.strategy.set_ml_model(model)
+            self._last_retrain_week = current_week
+
+            self.console.print(
+                f"[bold green]ML model retrained — "
+                f"Accuracy: {metrics['accuracy']:.3f} | "
+                f"AUC-ROC: {metrics['auc_roc']:.3f}[/bold green]"
+            )
+
+            if self.line.enabled:
+                mode_tag = "🧪 PAPER" if self.paper_trader else "💹 LIVE"
+                self.line.send(
+                    f"🤖 ML Model Retrained [{mode_tag}]\n"
+                    f"\n"
+                    f"Accuracy: {metrics['accuracy']:.3f}\n"
+                    f"AUC-ROC: {metrics['auc_roc']:.3f}\n"
+                    f"Trained on {len(data)} stocks, 2 years of data"
+                )
+        except Exception as e:
+            self.console.print(f"[red]Auto-retrain failed: {e}[/red]")
 
     def _check_breaking_news(self):
         """Check for new headlines since last cycle. Analyze and alert if significant."""
@@ -416,6 +470,7 @@ class Monitor:
                     # Outside market hours: still check for breaking news
                     self._check_breaking_news()
                     self._refresh_sentiment()
+                    self._auto_retrain()
                     now = datetime.now(self.tz).strftime("%H:%M:%S")
                     self.console.print(
                         f"[dim][{now}] Market closed. Watching for news...[/dim]"
