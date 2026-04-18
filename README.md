@@ -52,6 +52,37 @@ docker compose down
 
 Config, paper trading state, and trained models are mounted as volumes and persist across container restarts. The container auto-restarts after crashes or server reboots.
 
+### Cloud Server Setup (Oracle Cloud / EC2 / etc.)
+
+```bash
+# SSH into your server
+ssh -i your-key.key opc@your-server-ip
+
+# Clone the repo
+git clone https://github.com/YOUR_USERNAME/kabu-trader.git
+cd kabu-trader
+
+# Run the setup script (installs Docker, adds swap, sets timezone)
+bash scripts/setup-server.sh
+
+# Log out and back in (for Docker group)
+exit
+ssh -i your-key.key opc@your-server-ip
+cd kabu-trader
+
+# Edit config with your credentials
+nano config/default.json
+
+# Train ML model
+docker compose run --rm kabu-trader train
+
+# Start paper trading (runs 24/7)
+docker compose up -d
+
+# Check it's running
+docker compose logs -f
+```
+
 ## Usage
 
 ```bash
