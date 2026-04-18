@@ -204,8 +204,9 @@ class Monitor:
             # Alert if significant (score >= 3 or <= -3)
             if abs(score) >= 3 and self.line.enabled:
                 direction = "BULLISH" if score > 0 else "BEARISH"
+                mode_tag = "🧪 PAPER" if self.paper_trader else "💹 LIVE"
                 message = (
-                    f"🚨 Breaking News Alert\n"
+                    f"🚨 Breaking News Alert [{mode_tag}]\n"
                     f"\n"
                     f"{'🟢' if score > 0 else '🔴'} {direction} ({score:+d})\n"
                     f"📌 {name} ({ticker})\n"
@@ -288,7 +289,7 @@ class Monitor:
             # Send LINE for stop loss / take profit
             if self.line.enabled:
                 msg = (
-                    f"📋 Paper Trade: {action['reason'].upper()}\n"
+                    f"📋 Trade: {action['reason'].upper()} [🧪 PAPER]\n"
                     f"{'🟢' if pnl > 0 else '🔴'} SELL {action['name']}\n"
                     f"💰 ¥{action['price']:,.0f} → P&L: ¥{pnl:+,.0f} ({action['pnl_pct']:+.1f}%)"
                 )

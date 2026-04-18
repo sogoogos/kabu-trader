@@ -11,6 +11,8 @@ Japanese stock swing trading system with real-time monitoring, signal scanning, 
 
 ## Setup
 
+### Option A: Local (Python)
+
 ```bash
 # Create a virtual environment
 python3 -m venv venv
@@ -22,6 +24,33 @@ source venv/bin/activate    # macOS / Linux
 # Install dependencies
 pip install yfinance pandas numpy rich scikit-learn openai
 ```
+
+### Option B: Docker (recommended for cloud / 24/7 operation)
+
+```bash
+# Copy the example config and fill in your credentials
+cp config/default.example.json config/default.json
+
+# Build and start (runs paper trading monitor by default)
+docker compose up -d
+
+# Check logs
+docker compose logs -f
+
+# Check paper trading report
+docker compose exec kabu-trader python -m kabu_trader.cli report
+
+# Run a scan
+docker compose exec kabu-trader python -m kabu_trader.cli scan
+
+# Train ML model
+docker compose exec kabu-trader python -m kabu_trader.cli train
+
+# Stop
+docker compose down
+```
+
+Config, paper trading state, and trained models are mounted as volumes and persist across container restarts. The container auto-restarts after crashes or server reboots.
 
 ## Usage
 

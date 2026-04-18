@@ -1,0 +1,15 @@
+services:
+  kabu-trader:
+    build: .
+    container_name: kabu-trader
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./paper_trading:/app/paper_trading
+      - ./models:/app/models
+    environment:
+      - TZ=Asia/Tokyo
+      # Uncomment and set these instead of putting them in config
+      # - OPENAI_API_KEY=sk-...
+      # - LINE_CHANNEL_ACCESS_TOKEN=...
+      # - LINE_USER_ID=U...

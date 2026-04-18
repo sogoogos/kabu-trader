@@ -16,6 +16,7 @@ class LineNotifier:
 
     def __init__(self, config: dict):
         self.enabled = config.get("enabled", False)
+        self.paper_mode = False
         if not self.enabled:
             return
 
@@ -70,8 +71,9 @@ class LineNotifier:
         score = alert["score"]
         reasons = alert.get("reasons", [])
 
+        mode_tag = "🧪 PAPER TEST" if self.paper_mode else "💹 LIVE"
         lines = [
-            f"📊 Kabu Trader Alert",
+            f"📊 Kabu Trader Alert [{mode_tag}]",
             f"",
             f"{'🟢' if 'BUY' in signal else '🔴'} {signal}",
             f"📌 {label}",

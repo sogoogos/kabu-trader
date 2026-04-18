@@ -148,6 +148,7 @@ def cmd_monitor(args):
     if args.paper:
         from .paper_trader import PaperTrader
         monitor.paper_trader = PaperTrader(config["backtest"])
+        monitor.line.paper_mode = True
         summary = monitor.paper_trader.get_summary()
         console.print(Panel(
             f"Paper trading enabled\n"
