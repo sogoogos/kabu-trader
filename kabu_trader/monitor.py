@@ -46,6 +46,17 @@ class Monitor:
         self._seen_headlines: set = set()  # track seen news headlines
         self.paper_trader: Optional[PaperTrader] = None
 
+        # Seed headlines at startup so existing news doesn't trigger alerts
+        self._seed_headlines()
+
+    def _seed_headlines(self):
+        """Load all current headlines so only truly new ones trigger alerts."""
+        from .news_fetcher import fetch_stock_news
+        for ticker in self.watchlist:
+            for item in fetch_stock_news(ticker, 5):
+                if item["title"]:
+                    self._seen_headlines.add(item["title"])
+
     def _is_trading_hours(self) -> bool:
         now = datetime.now(self.tz)
         start_h, start_m = map(int, self.monitor_config["trading_hours_start"].split(":"))
@@ -143,13 +154,6 @@ class Monitor:
         sentiment_data = self.llm.analyze_multiple(self.watchlist, self.names)
         self.strategy.set_sentiment_data(sentiment_data)
         self._last_sentiment_time = now
-
-        # Seed seen headlines so we don't re-alert on existing news
-        from .news_fetcher import fetch_stock_news
-        for ticker in self.watchlist:
-            for item in fetch_stock_news(ticker, 5):
-                self._seen_headlines.add(item["title"])
-
         self.console.print(
             f"[bold green]Sentiment updated for {len(sentiment_data)} stocks[/bold green]"
         )
@@ -201,10 +205,11 @@ class Monitor:
             sentiment_data[ticker] = result
             self.strategy.set_sentiment_data(sentiment_data)
 
-            # Alert if significant (score >= 3 or <= -3)
-            if abs(score) >= 3 and self.line.enabled:
+            # Alert if significant (score >= 4 or <= -4)
+            if abs(score) >= 4 and self.line.enabled:
                 direction = "BULLISH" if score > 0 else "BEARISH"
                 mode_tag = "🧪 PAPER" if self.paper_trader else "💹 LIVE"
+                link = new_headlines[0].get("link", "")
                 message = (
                     f"🚨 Breaking News Alert [{mode_tag}]\n"
                     f"\n"
@@ -215,6 +220,8 @@ class Monitor:
                     f"\n"
                     f"💡 {reasoning}"
                 )
+                if link:
+                    message += f"\n\n🔗 {link}"
 
                 today = datetime.now(self.tz).strftime("%Y-%m-%d")
                 key = f"{today}:news:{ticker}:{new_headlines[0]['title'][:50]}"
