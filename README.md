@@ -89,9 +89,40 @@ python3 -m kabu_trader.cli monitor
 # Run a single monitoring cycle
 python3 -m kabu_trader.cli monitor --once
 
+# Start monitor with paper trading (simulated money, no real trades)
+python3 -m kabu_trader.cli monitor --paper
+
+# Run a single paper trading cycle
+python3 -m kabu_trader.cli monitor --paper --once
+
+# Check paper trading results (works even when monitor is stopped)
+python3 -m kabu_trader.cli report
+
+# Reset paper trading state and start fresh
+python3 -m kabu_trader.cli report --reset
+
 # Use a custom config file
 python3 -m kabu_trader.cli -c config/my_config.json backtest
 ```
+
+## Paper Trading (Dry Run)
+
+Test the system with virtual money before risking real capital.
+
+```bash
+# Start paper trading
+python3 -m kabu_trader.cli monitor --paper
+```
+
+- Starts with **¥1,000,000** virtual capital
+- Simulates trades at real market prices when signals trigger
+- Tracks stop loss (-5%) and take profit (+15%) automatically
+- Max 5 concurrent positions, 10% of capital per trade
+- State saved to `paper_trading/state.json` — survives restarts
+- LINE notifications tagged with `🧪 PAPER TEST` to distinguish from live
+- Check results any time with `python3 -m kabu_trader.cli report`
+
+Recommended: run for 1-2 weeks before committing real money.
 
 ## Strategy: Composite Swing Trading
 
