@@ -42,6 +42,7 @@ class Monitor:
         self.llm = LLMSentimentAnalyzer(config.get("llm_sentiment", {}))
         self._sent_signals: set = set()  # track sent alerts to avoid duplicates
         self._last_sentiment_time: float = 0  # timestamp of last sentiment refresh
+        self._seen_headlines: set = set()  # track seen news headlines
 
     def _is_trading_hours(self) -> bool:
         now = datetime.now(self.tz)
@@ -131,8 +132,8 @@ class Monitor:
         if not self.llm.enabled:
             return
 
-        import time
-        now = time.time()
+        import time as _time
+        now = _time.time()
         if now - self._last_sentiment_time < 3600:
             return
 
@@ -140,9 +141,86 @@ class Monitor:
         sentiment_data = self.llm.analyze_multiple(self.watchlist, self.names)
         self.strategy.set_sentiment_data(sentiment_data)
         self._last_sentiment_time = now
+
+        # Seed seen headlines so we don't re-alert on existing news
+        from .news_fetcher import fetch_stock_news
+        for ticker in self.watchlist:
+            for item in fetch_stock_news(ticker, 5):
+                self._seen_headlines.add(item["title"])
+
         self.console.print(
             f"[bold green]Sentiment updated for {len(sentiment_data)} stocks[/bold green]"
         )
+
+    def _check_breaking_news(self):
+        """Check for new headlines since last cycle. Analyze and alert if significant."""
+        if not self.llm.enabled:
+            return
+
+        from .news_fetcher import fetch_stock_news
+
+        for ticker in self.watchlist:
+            news = fetch_stock_news(ticker, 3)
+            new_headlines = []
+
+            for item in news:
+                title = item["title"]
+                if title and title not in self._seen_headlines:
+                    self._seen_headlines.add(title)
+                    new_headlines.append(item)
+
+            if not new_headlines:
+                continue
+
+            # New headline(s) detected — analyze just these
+            name = self.names.get(ticker, ticker)
+            headlines_text = "\n".join(
+                f"- {h['title']} ({h['publisher']})" for h in new_headlines
+            )
+
+            self.console.print(
+                f"[bold yellow]Breaking news for {name}:[/bold yellow] "
+                f"{new_headlines[0]['title']}"
+            )
+
+            result = self.llm.analyze_stock(
+                ticker, company_name=name, price=0,
+                performance=f"Breaking: {len(new_headlines)} new headline(s)",
+            )
+
+            if not result:
+                continue
+
+            score = result.get("score", 0)
+            reasoning = result.get("reasoning", "")
+
+            # Update sentiment data in strategy
+            sentiment_data = dict(self.strategy.sentiment_data)
+            sentiment_data[ticker] = result
+            self.strategy.set_sentiment_data(sentiment_data)
+
+            # Alert if significant (score >= 3 or <= -3)
+            if abs(score) >= 3 and self.line.enabled:
+                direction = "BULLISH" if score > 0 else "BEARISH"
+                message = (
+                    f"🚨 Breaking News Alert\n"
+                    f"\n"
+                    f"{'🟢' if score > 0 else '🔴'} {direction} ({score:+d})\n"
+                    f"📌 {name} ({ticker})\n"
+                    f"\n"
+                    f"📰 {new_headlines[0]['title']}\n"
+                    f"\n"
+                    f"💡 {reasoning}"
+                )
+
+                today = datetime.now(self.tz).strftime("%Y-%m-%d")
+                key = f"{today}:news:{ticker}:{new_headlines[0]['title'][:50]}"
+                if key not in self._sent_signals:
+                    if self.line.send(message):
+                        self._sent_signals.add(key)
+                        self.console.print(
+                            f"[bold yellow]LINE breaking news alert sent for {name}[/bold yellow]"
+                        )
 
     def _analyze_signals(self):
         """Fetch recent data and analyze signals for all watchlist stocks."""
@@ -188,6 +266,7 @@ class Monitor:
     def run_once(self):
         """Run a single monitoring cycle and print results."""
         self.console.print("\n[bold]Fetching data...[/bold]")
+        self._check_breaking_news()
         self._analyze_signals()
         self._send_line_alerts()
 
