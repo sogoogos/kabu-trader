@@ -21,10 +21,22 @@ else
     echo "Swap already exists, skipping."
 fi
 
+# Detect distro (Amazon Linux needs special handling — get.docker.com rejects 'amzn')
+DISTRO_ID=""
+if [ -f /etc/os-release ]; then
+    DISTRO_ID=$(. /etc/os-release && echo "$ID")
+fi
+
 # 2. Install Docker
 if ! command -v docker &> /dev/null; then
     echo "--- Installing Docker ---"
-    curl -fsSL https://get.docker.com | sudo sh
+    if [ "$DISTRO_ID" = "amzn" ]; then
+        sudo yum install -y docker
+        sudo systemctl enable --now docker
+    else
+        curl -fsSL https://get.docker.com | sudo sh
+        sudo systemctl enable --now docker 2>/dev/null || true
+    fi
     sudo usermod -aG docker $USER
     echo "Docker installed. You need to log out and back in for group changes."
 else
@@ -34,9 +46,19 @@ fi
 # 3. Install Docker Compose plugin
 if ! docker compose version &> /dev/null 2>&1; then
     echo "--- Installing Docker Compose ---"
-    sudo apt-get update && sudo apt-get install -y docker-compose-plugin 2>/dev/null || \
-    sudo yum install -y docker-compose-plugin 2>/dev/null || \
-    echo "Please install docker-compose-plugin manually."
+    if [ "$DISTRO_ID" = "amzn" ]; then
+        # Amazon Linux: no docker-compose-plugin package — install the plugin binary manually
+        COMPOSE_VERSION="v2.29.7"
+        ARCH=$(uname -m)
+        sudo mkdir -p /usr/libexec/docker/cli-plugins
+        sudo curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${ARCH}" \
+            -o /usr/libexec/docker/cli-plugins/docker-compose
+        sudo chmod +x /usr/libexec/docker/cli-plugins/docker-compose
+    else
+        sudo apt-get update && sudo apt-get install -y docker-compose-plugin 2>/dev/null || \
+        sudo yum install -y docker-compose-plugin 2>/dev/null || \
+        echo "Please install docker-compose-plugin manually."
+    fi
 else
     echo "Docker Compose already installed."
 fi
