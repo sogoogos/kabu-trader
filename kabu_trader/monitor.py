@@ -62,12 +62,12 @@ class Monitor:
 
     def _seed_headlines(self):
         """Load all current headlines so only truly new ones trigger alerts."""
-        from .news_fetcher import fetch_stock_news
-        for ticker in self.watchlist:
-            for item in fetch_stock_news(ticker, 5):
+        from .news_fetcher import fetch_market_news
+        news_by_ticker = fetch_market_news(self.market_name, self.names)
+        for items in news_by_ticker.values():
+            for item in items:
                 if item["title"]:
                     self._seen_headlines.add(item["title"])
-            time.sleep(0.3)
 
     def _is_trading_hours(self) -> bool:
         now = datetime.now(self.tz)
@@ -231,10 +231,11 @@ class Monitor:
         if not self.llm.enabled:
             return
 
-        from .news_fetcher import fetch_stock_news
+        from .news_fetcher import fetch_market_news
 
-        for ticker in self.watchlist:
-            news = fetch_stock_news(ticker, 3)
+        news_by_ticker = fetch_market_news(self.market_name, self.names)
+
+        for ticker, news in news_by_ticker.items():
             new_headlines = []
 
             for item in news:
@@ -244,7 +245,6 @@ class Monitor:
                     new_headlines.append(item)
 
             if not new_headlines:
-                time.sleep(0.3)
                 continue
 
             # New headline(s) detected — analyze just these
