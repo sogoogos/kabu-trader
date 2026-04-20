@@ -131,7 +131,7 @@
     "timezone": "America/New_York"
   },
   "llm_sentiment": {
-    "enabled": false,
+    "enabled": true,
     "api_key": "",
     "model": "gpt-4o-mini"
   },
@@ -148,7 +148,7 @@
     }
   },
   "line": {
-    "enabled": false,
+    "enabled": true,
     "channel_access_token": "",
     "user_id": ""
   }
