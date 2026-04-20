@@ -26,18 +26,23 @@ _MARKET_FEEDS = {
 def fetch_market_news(
     market: str,
     watchlist_names: Dict[str, str],
+    watchlist_aliases: Dict[str, List[str]] | None = None,
     timeout: int = 10,
 ) -> Dict[str, List[dict]]:
     """Fetch market-wide headlines once and attribute them to tickers by name match.
 
     Args:
         market: "JP" or "US".
-        watchlist_names: ticker -> company name. Title must contain the name to match.
+        watchlist_names: ticker -> primary company name. Substring-matched against titles.
+        watchlist_aliases: optional ticker -> list of extra short names / aliases
+            (e.g. {"META": ["Meta", "Facebook"], "GOOGL": ["Alphabet", "Google"]}).
+            A ticker matches a headline if ANY of its primary name or aliases is a substring.
         timeout: HTTP timeout in seconds.
 
     Returns:
         ticker -> list of matched headlines (schema: title, publisher, link, published).
     """
+    aliases = watchlist_aliases or {}
     url = _MARKET_FEEDS.get(market.upper())
     if not url:
         return {}
@@ -70,9 +75,10 @@ def fetch_market_news(
 
     results: Dict[str, List[dict]] = {}
     for ticker, name in watchlist_names.items():
-        if not name:
+        needles = [n for n in ([name] + list(aliases.get(ticker, []))) if n]
+        if not needles:
             continue
-        matched = [h for h in headlines if name in h["title"]]
+        matched = [h for h in headlines if any(n in h["title"] for n in needles)]
         if matched:
             results[ticker] = matched
     return results

@@ -29,9 +29,15 @@ from .paper_trader import PaperTrader
 class Monitor:
     """Real-time monitor that watches stocks and generates alerts."""
 
-    def __init__(self, config: dict, names: Optional[Dict[str, str]] = None):
+    def __init__(
+        self,
+        config: dict,
+        names: Optional[Dict[str, str]] = None,
+        aliases: Optional[Dict[str, List[str]]] = None,
+    ):
         self.watchlist = config["watchlist"]
         self.names = names or {}
+        self.aliases = aliases or {}
         self.strategy_params = config["strategy"]["params"]
         self.monitor_config = config["monitor"]
         market_config = config.get("market", {})
@@ -63,7 +69,7 @@ class Monitor:
     def _seed_headlines(self):
         """Load all current headlines so only truly new ones trigger alerts."""
         from .news_fetcher import fetch_market_news
-        news_by_ticker = fetch_market_news(self.market_name, self.names)
+        news_by_ticker = fetch_market_news(self.market_name, self.names, self.aliases)
         for items in news_by_ticker.values():
             for item in items:
                 if item["title"]:
@@ -233,7 +239,7 @@ class Monitor:
 
         from .news_fetcher import fetch_market_news
 
-        news_by_ticker = fetch_market_news(self.market_name, self.names)
+        news_by_ticker = fetch_market_news(self.market_name, self.names, self.aliases)
 
         for ticker, news in news_by_ticker.items():
             new_headlines = []

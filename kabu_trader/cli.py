@@ -155,8 +155,9 @@ def cmd_monitor(args):
     config = load_config(args.config)
     market = get_market_settings(config)
     names = config.get("watchlist_names", {})
+    aliases = config.get("watchlist_aliases", {})
     model_name = config.get("ml", {}).get("model_name", "default")
-    monitor = Monitor(config, names)
+    monitor = Monitor(config, names, aliases)
 
     # Load ML model if available
     from .ml_model import MLPredictor

@@ -56,6 +56,26 @@
     "F": "Ford", "GM": "General Motors", "RIVN": "Rivian", "LCID": "Lucid",
     "COIN": "Coinbase", "HOOD": "Robinhood", "SOFI": "SoFi Technologies"
   },
+  "watchlist_aliases": {
+    "GOOGL": ["Google"],
+    "META": ["Meta", "Facebook", "Instagram", "WhatsApp"],
+    "BRK-B": ["Berkshire", "Buffett"],
+    "JPM": ["JPMorgan"],
+    "BAC": ["BofA"],
+    "JNJ": ["J&J"],
+    "BMY": ["Bristol-Myers"],
+    "ABT": ["Abbott"],
+    "XOM": ["Exxon"],
+    "WMT": ["Wal-Mart"],
+    "HD": ["Home Depot"],
+    "PG": ["P&G"],
+    "KO": ["Coke"],
+    "MCD": ["McDonalds"],
+    "GE": ["GE Aerospace", "GE Vernova"],
+    "F": ["Ford Motor"],
+    "GM": ["GM "],
+    "T": ["AT&T"]
+  },
   "strategy": {
     "name": "swing_composite",
     "params": {
