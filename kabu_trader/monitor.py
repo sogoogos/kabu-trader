@@ -182,10 +182,15 @@ class Monitor:
         )
 
     def _refresh_earnings(self):
-        """Refresh earnings-gap data once every 6 hours."""
+        """Refresh earnings-gap data once a day.
+
+        Yahoo/yfinance rate-limits aggressively. The tracker itself caches tickers
+        with no recent earnings for 7 days, so the per-cycle cost is small, but we
+        only trigger the iteration once/day to be safe.
+        """
         import time as _time
         now = _time.time()
-        if now - self._last_earnings_time < 6 * 3600:
+        if now - self._last_earnings_time < 24 * 3600:
             return
 
         self.console.print("[bold]Refreshing earnings-day gaps...[/bold]")

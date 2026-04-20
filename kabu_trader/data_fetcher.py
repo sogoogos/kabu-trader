@@ -7,6 +7,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
+from . import rate_limit
+
 
 class DataFetcher:
     """Fetches historical and current stock data for any yfinance-supported market."""
@@ -31,11 +33,20 @@ class DataFetcher:
         Returns:
             DataFrame with columns: Open, High, Low, Close, Volume
         """
+        if rate_limit.is_cooling_down():
+            raise RuntimeError(
+                f"yfinance rate-limit cooldown active ({rate_limit.seconds_remaining()}s remaining)"
+            )
+
         end = datetime.now()
         start = end - timedelta(days=days)
 
-        stock = yf.Ticker(ticker)
-        df = stock.history(start=start, end=end, interval=interval)
+        try:
+            stock = yf.Ticker(ticker)
+            df = stock.history(start=start, end=end, interval=interval)
+        except Exception as e:
+            rate_limit.detect_and_record(e)
+            raise
 
         if df.empty:
             raise ValueError(f"No data returned for {ticker}")
@@ -57,9 +68,15 @@ class DataFetcher:
         days: int = 365,
         interval: str = "1d",
     ) -> Dict[str, pd.DataFrame]:
-        """Fetch historical data for multiple tickers."""
+        """Fetch historical data for multiple tickers. Short-circuits on rate-limit cooldown."""
         results = {}
         for ticker in tickers:
+            if rate_limit.is_cooling_down():
+                print(
+                    f"Warning: yfinance cooldown active — skipping remaining "
+                    f"{len(tickers) - len(results)} tickers ({rate_limit.seconds_remaining()}s left)"
+                )
+                break
             try:
                 results[ticker] = self.fetch_historical(ticker, days, interval)
             except Exception as e:
@@ -68,8 +85,16 @@ class DataFetcher:
 
     def fetch_current_price(self, ticker: str) -> dict:
         """Fetch current/latest price info for a ticker."""
-        stock = yf.Ticker(ticker)
-        info = stock.fast_info
+        if rate_limit.is_cooling_down():
+            raise RuntimeError(
+                f"yfinance rate-limit cooldown active ({rate_limit.seconds_remaining()}s remaining)"
+            )
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.fast_info
+        except Exception as e:
+            rate_limit.detect_and_record(e)
+            raise
 
         return {
             "ticker": ticker,
