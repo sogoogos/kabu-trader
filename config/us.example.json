@@ -1116,7 +1116,7 @@
   },
   "ml": {
     "forward_days": 5,
-    "threshold": 0.03,
+    "threshold": 0.015,
     "model_name": "us",
     "model_params": {
       "n_estimators": 200,
