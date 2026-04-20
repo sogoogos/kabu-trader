@@ -67,6 +67,7 @@ class Monitor:
             for item in fetch_stock_news(ticker, 5):
                 if item["title"]:
                     self._seen_headlines.add(item["title"])
+            time.sleep(0.3)
 
     def _is_trading_hours(self) -> bool:
         now = datetime.now(self.tz)
@@ -243,6 +244,7 @@ class Monitor:
                     new_headlines.append(item)
 
             if not new_headlines:
+                time.sleep(0.3)
                 continue
 
             # New headline(s) detected — analyze just these

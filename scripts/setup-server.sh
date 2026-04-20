@@ -67,13 +67,17 @@ fi
 echo "--- Setting timezone to Asia/Tokyo ---"
 sudo timedatectl set-timezone Asia/Tokyo
 
-# 5. Create config from example
-if [ -f config/default.example.json ] && [ ! -f config/default.json ]; then
-    echo "--- Creating config from example ---"
-    cp config/default.example.json config/default.json
-    echo "Created config/default.json — edit it to add your credentials:"
-    echo "  nano config/default.json"
-fi
+# 5. Create configs from examples (one per market)
+for market in default us; do
+    example="config/${market}.example.json"
+    target="config/${market}.json"
+    if [ -f "$example" ] && [ ! -f "$target" ]; then
+        echo "--- Creating $target from example ---"
+        cp "$example" "$target"
+        echo "Created $target — edit it to add your credentials:"
+        echo "  nano $target"
+    fi
+done
 
 echo ""
 echo "=== Setup complete ==="

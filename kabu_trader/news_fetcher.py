@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import yfinance as yf
 from typing import Dict, List
 
@@ -16,11 +17,17 @@ def fetch_stock_news(ticker: str, max_items: int = 10) -> List[dict]:
     Returns:
         List of dicts with keys: title, publisher, link, published
     """
-    try:
-        stock = yf.Ticker(ticker)
-        news = stock.news or []
-    except Exception:
-        return []
+    news = []
+    for attempt in range(2):
+        try:
+            stock = yf.Ticker(ticker)
+            news = stock.news or []
+        except Exception:
+            news = []
+        if news:
+            break
+        if attempt == 0:
+            time.sleep(1.5)
 
     results = []
     for item in news[:max_items]:
