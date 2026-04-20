@@ -23,6 +23,7 @@ from .data_fetcher import DataFetcher
 from .strategy import SwingCompositeStrategy, Signal
 from .notifier import LineNotifier
 from .llm_sentiment import LLMSentimentAnalyzer
+from .earnings_tracker import EarningsTracker
 from .paper_trader import PaperTrader
 
 
@@ -56,9 +57,11 @@ class Monitor:
             market_name=self.market_name,
         )
         self.llm = LLMSentimentAnalyzer(config.get("llm_sentiment", {}))
+        self.earnings = EarningsTracker()
         self.config = config
         self._sent_signals: set = set()  # track sent alerts to avoid duplicates
         self._last_sentiment_time: float = 0  # timestamp of last sentiment refresh
+        self._last_earnings_time: float = 0  # timestamp of last earnings refresh
         self._last_retrain_week: int = -1  # ISO week number of last retrain
         self._seen_headlines: set = set()  # track seen news headlines
         self.paper_trader: Optional[PaperTrader] = None
@@ -176,6 +179,21 @@ class Monitor:
         self._last_sentiment_time = now
         self.console.print(
             f"[bold green]Sentiment updated for {len(sentiment_data)} stocks[/bold green]"
+        )
+
+    def _refresh_earnings(self):
+        """Refresh earnings-gap data once every 6 hours."""
+        import time as _time
+        now = _time.time()
+        if now - self._last_earnings_time < 6 * 3600:
+            return
+
+        self.console.print("[bold]Refreshing earnings-day gaps...[/bold]")
+        earnings_data = self.earnings.refresh_all(self.watchlist)
+        self.strategy.set_earnings_data(earnings_data)
+        self._last_earnings_time = now
+        self.console.print(
+            f"[bold green]Earnings data updated for {len(earnings_data)} stocks[/bold green]"
         )
 
     def _auto_retrain(self):
@@ -311,6 +329,7 @@ class Monitor:
         """Fetch recent data and analyze signals for all watchlist stocks."""
         self.alerts = []
         self._refresh_sentiment()
+        self._refresh_earnings()
         benchmark_df = self.fetcher.fetch_benchmark(days=60)
         self.strategy.set_benchmark_data(benchmark_df)
         data = self.fetcher.fetch_multiple(self.watchlist, days=60, interval="1d")
@@ -494,6 +513,7 @@ class Monitor:
                     # Outside market hours: still check for breaking news
                     self._check_breaking_news()
                     self._refresh_sentiment()
+                    self._refresh_earnings()
                     self._auto_retrain()
                     now = datetime.now(self.tz).strftime("%H:%M:%S")
                     self.console.print(

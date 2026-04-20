@@ -72,6 +72,7 @@ class SwingCompositeStrategy:
         "relative_strength": 2.5,
         "ml": 3.0,
         "sentiment": 2.5,
+        "earnings": 2.0,
     }
 
     def __init__(self, params: dict, benchmark_name: str = "Nikkei"):
@@ -80,6 +81,7 @@ class SwingCompositeStrategy:
         self.benchmark_name = benchmark_name
         self.ml_model = None
         self.sentiment_data: dict = {}  # ticker -> sentiment result
+        self.earnings_data: dict = {}  # ticker -> earnings-gap dict
 
         # Merge user-configured weights with defaults
         user_weights = params.get("indicator_weights", {})
@@ -97,6 +99,10 @@ class SwingCompositeStrategy:
     def set_sentiment_data(self, sentiment_data: dict):
         """Set LLM sentiment analysis results. Dict of ticker -> sentiment result."""
         self.sentiment_data = sentiment_data or {}
+
+    def set_earnings_data(self, earnings_data: dict):
+        """Set earnings-day price-gap data. Dict of ticker -> {days_ago, gap_pct, date}."""
+        self.earnings_data = earnings_data or {}
 
     def analyze(self, df: pd.DataFrame, ticker: str = "") -> List[TradeSignal]:
         """Analyze a DataFrame and generate signals for each row.
@@ -187,6 +193,7 @@ class SwingCompositeStrategy:
             ("relative_strength", self._score_relative_strength, (df, i)),
             ("ml", self._score_ml, (df, i)),
             ("sentiment", self._score_sentiment, (ticker,)),
+            ("earnings", self._score_earnings_surprise, (ticker,)),
         ]
 
         for name, scorer, args in scorers:
@@ -471,3 +478,33 @@ class SwingCompositeStrategy:
 
         direction = "bullish" if score > 0 else "bearish"
         return max(-1.0, min(1.0, score)), f"News sentiment {direction} ({raw_score:+d}): {reasoning}"
+
+    def _score_earnings_surprise(self, ticker: str) -> Tuple[float, str]:
+        """Score based on earnings-day close-to-close gap (proxy for beat/miss).
+
+        Effect decays with time: full within 3 days, 0.5x through 7d, 0.25x through 14d.
+        Gap of ±5% maps to ±1.0 before decay.
+        """
+        data = self.earnings_data.get(ticker)
+        if not data:
+            return 0, ""
+
+        days_ago = data.get("days_ago", 999)
+        gap_pct = data.get("gap_pct", 0.0)
+
+        if days_ago <= 3:
+            decay = 1.0
+        elif days_ago <= 7:
+            decay = 0.5
+        elif days_ago <= 14:
+            decay = 0.25
+        else:
+            return 0, ""
+
+        raw = max(-1.0, min(1.0, gap_pct / 5.0))
+        score = raw * decay
+        if abs(score) < 0.1:
+            return 0, ""
+
+        direction = "beat" if gap_pct > 0 else "miss"
+        return score, f"Earnings {direction} ({gap_pct:+.1f}% gap, {days_ago}d ago)"
