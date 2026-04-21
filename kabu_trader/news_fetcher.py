@@ -9,9 +9,26 @@ Two modes:
 from __future__ import annotations
 
 import time
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Dict, List
+
+
+def shorten_url(url: str, timeout: int = 3) -> str:
+    """Shorten a URL via is.gd. Returns the original on any failure."""
+    if not url or len(url) <= 60:
+        return url
+    try:
+        api = f"https://is.gd/create.php?format=simple&url={urllib.parse.quote(url, safe='')}"
+        req = urllib.request.Request(api, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            short = resp.read().decode("utf-8").strip()
+            if short.startswith("http"):
+                return short
+    except Exception:
+        pass
+    return url
 
 import yfinance as yf
 

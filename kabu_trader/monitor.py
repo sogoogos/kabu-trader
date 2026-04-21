@@ -318,7 +318,8 @@ class Monitor:
                 continue
             direction = "BULLISH" if score > 0 else "BEARISH"
             mode_tag = "🧪 PAPER" if self.paper_trader else "💹 LIVE"
-            link = new_headlines[0].get("link", "")
+            from .news_fetcher import shorten_url
+            link = shorten_url(new_headlines[0].get("link", ""))
             message = (
                 f"🚨 Breaking News Alert [{mode_tag}]\n"
                 f"\n"
