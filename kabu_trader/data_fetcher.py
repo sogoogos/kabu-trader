@@ -68,55 +68,106 @@ class DataFetcher:
         days: int = 365,
         interval: str = "1d",
     ) -> Dict[str, pd.DataFrame]:
-        """Fetch historical data for multiple tickers. Short-circuits on rate-limit cooldown."""
-        results = {}
+        """Fetch historical data for many tickers in a single batched yfinance request.
+
+        Dramatically cheaper than per-ticker calls: for N tickers yfinance makes
+        ~ceil(N/200) HTTP requests instead of N.
+        """
+        if not tickers:
+            return {}
+        if rate_limit.is_cooling_down():
+            print(
+                f"Warning: yfinance cooldown active — skipping batch fetch for "
+                f"{len(tickers)} tickers ({rate_limit.seconds_remaining()}s left)"
+            )
+            return {}
+
+        end = datetime.now()
+        start = end - timedelta(days=days)
+
+        try:
+            data = yf.download(
+                tickers=tickers,
+                start=start,
+                end=end,
+                interval=interval,
+                group_by="ticker",
+                threads=False,       # single-threaded to avoid bursting Yahoo
+                progress=False,
+                auto_adjust=True,
+            )
+        except Exception as e:
+            rate_limit.detect_and_record(e)
+            print(f"Warning: batch fetch failed: {e}")
+            return {}
+
+        results: Dict[str, pd.DataFrame] = {}
+        has_multiindex = isinstance(data.columns, pd.MultiIndex)
         for ticker in tickers:
-            if rate_limit.is_cooling_down():
-                print(
-                    f"Warning: yfinance cooldown active — skipping remaining "
-                    f"{len(tickers) - len(results)} tickers ({rate_limit.seconds_remaining()}s left)"
-                )
-                break
             try:
-                results[ticker] = self.fetch_historical(ticker, days, interval)
-            except Exception as e:
-                print(f"Warning: Failed to fetch {ticker}: {e}")
+                if has_multiindex:
+                    # group_by='ticker' puts ticker at the outer level
+                    if ticker in data.columns.get_level_values(0):
+                        df = data[ticker]
+                    elif ticker in data.columns.get_level_values(-1):
+                        df = data.xs(ticker, axis=1, level=-1)
+                    else:
+                        continue
+                else:
+                    df = data
+                df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+                df = df.dropna(how="all")
+                if df.empty:
+                    continue
+                df.index = pd.to_datetime(df.index)
+                if df.index.tz is not None:
+                    df.index = df.index.tz_localize(None)
+                self._cache[ticker] = df
+                results[ticker] = df
+            except Exception:
+                continue
         return results
 
     def fetch_current_price(self, ticker: str) -> dict:
-        """Fetch current/latest price info for a ticker."""
-        if rate_limit.is_cooling_down():
-            raise RuntimeError(
-                f"yfinance rate-limit cooldown active ({rate_limit.seconds_remaining()}s remaining)"
-            )
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.fast_info
-        except Exception as e:
-            rate_limit.detect_and_record(e)
-            raise
+        """Return the latest bar as a price dict.
 
+        Uses cached history from fetch_multiple if available (zero network cost).
+        Falls back to a per-ticker history fetch if cache is cold.
+        """
+        df = self._cache.get(ticker)
+        if df is None or len(df) < 2:
+            # Fallback: fetch a few days of history for this one ticker.
+            try:
+                df = self.fetch_historical(ticker, days=5)
+            except Exception as e:
+                raise RuntimeError(f"No cached data for {ticker}: {e}")
+        if len(df) < 2:
+            raise RuntimeError(f"Not enough data rows for {ticker}")
+
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        prev_close = float(prev["Close"])
+        last_close = float(last["Close"])
         return {
             "ticker": ticker,
-            "price": info.last_price,
-            "previous_close": info.previous_close,
-            "open": info.open,
-            "day_high": info.day_high,
-            "day_low": info.day_low,
-            "volume": info.last_volume,
-            "change_pct": ((info.last_price - info.previous_close) / info.previous_close * 100)
-            if info.previous_close
-            else 0,
+            "price": last_close,
+            "previous_close": prev_close,
+            "open": float(last["Open"]),
+            "day_high": float(last["High"]),
+            "day_low": float(last["Low"]),
+            "volume": int(last["Volume"]),
+            "change_pct": (last_close - prev_close) / prev_close * 100 if prev_close else 0,
         }
 
     def fetch_current_prices(self, tickers: List[str]) -> List[dict]:
-        """Fetch current prices for multiple tickers."""
+        """Build per-ticker price dicts from the cache populated by fetch_multiple."""
         results = []
         for ticker in tickers:
             try:
                 results.append(self.fetch_current_price(ticker))
             except Exception as e:
-                print(f"Warning: Failed to fetch current price for {ticker}: {e}")
+                # Don't log per-ticker — cache misses are common during cooldown
+                continue
         return results
 
     def fetch_benchmark(self, days: int = 365) -> pd.DataFrame:
