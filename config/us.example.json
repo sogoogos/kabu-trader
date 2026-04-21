@@ -1112,7 +1112,8 @@
   "llm_sentiment": {
     "enabled": true,
     "api_key": "",
-    "model": "gpt-4o-mini"
+    "model": "gpt-4o-mini",
+    "breaking_alert_threshold": 3
   },
   "ml": {
     "forward_days": 5,

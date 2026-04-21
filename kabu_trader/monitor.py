@@ -303,32 +303,43 @@ class Monitor:
             sentiment_data[ticker] = result
             self.strategy.set_sentiment_data(sentiment_data)
 
-            # Alert if significant (score >= 4 or <= -4)
-            if abs(score) >= 4 and self.line.enabled:
-                direction = "BULLISH" if score > 0 else "BEARISH"
-                mode_tag = "🧪 PAPER" if self.paper_trader else "💹 LIVE"
-                link = new_headlines[0].get("link", "")
-                message = (
-                    f"🚨 Breaking News Alert [{mode_tag}]\n"
-                    f"\n"
-                    f"{'🟢' if score > 0 else '🔴'} {direction} ({score:+d})\n"
-                    f"📌 {name} ({ticker})\n"
-                    f"\n"
-                    f"📰 {new_headlines[0]['title']}\n"
-                    f"\n"
-                    f"💡 {reasoning}"
+            # Alert if significant. Threshold is configurable via
+            # config.llm_sentiment.breaking_alert_threshold (default 3).
+            alert_threshold = self.config.get("llm_sentiment", {}).get(
+                "breaking_alert_threshold", 3
+            )
+            if abs(score) < alert_threshold:
+                self.console.print(
+                    f"[dim]  → score {score:+d} below threshold "
+                    f"±{alert_threshold}, no LINE alert[/dim]"
                 )
-                if link:
-                    message += f"\n\n🔗 {link}"
+                continue
+            if not self.line.enabled:
+                continue
+            direction = "BULLISH" if score > 0 else "BEARISH"
+            mode_tag = "🧪 PAPER" if self.paper_trader else "💹 LIVE"
+            link = new_headlines[0].get("link", "")
+            message = (
+                f"🚨 Breaking News Alert [{mode_tag}]\n"
+                f"\n"
+                f"{'🟢' if score > 0 else '🔴'} {direction} ({score:+d})\n"
+                f"📌 {name} ({ticker})\n"
+                f"\n"
+                f"📰 {new_headlines[0]['title']}\n"
+                f"\n"
+                f"💡 {reasoning}"
+            )
+            if link:
+                message += f"\n\n🔗 {link}"
 
-                today = datetime.now(self.tz).strftime("%Y-%m-%d")
-                key = f"{today}:news:{ticker}:{new_headlines[0]['title'][:50]}"
-                if key not in self._sent_signals:
-                    if self.line.send(message):
-                        self._sent_signals.add(key)
-                        self.console.print(
-                            f"[bold yellow]LINE breaking news alert sent for {name}[/bold yellow]"
-                        )
+            today = datetime.now(self.tz).strftime("%Y-%m-%d")
+            key = f"{today}:news:{ticker}:{new_headlines[0]['title'][:50]}"
+            if key not in self._sent_signals:
+                if self.line.send(message):
+                    self._sent_signals.add(key)
+                    self.console.print(
+                        f"[bold yellow]LINE breaking news alert sent for {name}[/bold yellow]"
+                    )
 
     def _analyze_signals(self):
         """Fetch recent data and analyze signals for all watchlist stocks."""
