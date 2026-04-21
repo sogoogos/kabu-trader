@@ -199,8 +199,9 @@ The system combines 11 indicators into a weighted composite score. Each indicato
 | 7 | Money Flow Index (MFI) | Institutional buying/selling pressure | 2.0 |
 | 8 | ADX | Trend strength confirmation | 2.0 |
 | 9 | Relative Strength vs Nikkei | Outperformance vs market | 2.5 |
-| 10 | ML Model (Gradient Boosting) | Predicted probability of +3% in 5 days | 3.0 |
+| 10 | ML Model (Gradient Boosting) | Predicted probability of +1.5% in 5 days | 3.0 |
 | 11 | LLM News Sentiment (GPT) | News headline analysis | 2.5 |
+| 12 | Earnings Surprise | Close-to-close gap around most recent earnings (14-day decay) | 2.0 |
 
 Default weights are based on ML feature importance analysis. Higher weight = more influence on the final score.
 
@@ -220,9 +221,18 @@ Edit `indicator_weights` in `config/default.json` to tune. Set a weight to `0` t
   "adx": 2.0,
   "relative_strength": 2.5,
   "ml": 3.0,
-  "sentiment": 2.5
+  "sentiment": 2.5,
+  "earnings": 2.0
 }
 ```
+
+To random-search weights against a backtest:
+
+```bash
+python scripts/optimize_weights.py -c config/default.json -n 100 -d 365 -t 7203.T 6758.T 9984.T ...
+```
+
+Holds `sentiment`, `relative_strength`, `ml` fixed; randomizes the technical-indicator weights; prints the top-N by risk-adjusted return and writes the best set to `{config}.best_weights.json`.
 
 ### ML Model (auto-retrains weekly)
 
@@ -237,7 +247,7 @@ Uses OpenAI (GPT-4o-mini) to analyze news headlines:
 
 - Refreshes hourly + checks for breaking news every 60 seconds
 - Breaking news triggers instant LINE notification if sentiment score >= 4
-- Cost: ~$0.10-0.30/day for 109 stocks
+- Cost: ~$0.50-1.00/day for ~400 stocks (scales roughly linearly with watchlist size)
 
 Configure in `config/default.json`:
 ```json
@@ -270,12 +280,12 @@ Or use environment variable: `export OPENAI_API_KEY="sk-..."`
 
 ## Default Watchlists
 
-- **JP (`config/default.json`)** — 109 major Japanese stocks across 15 sectors
-  including automotive, electronics/semiconductors, banking/finance, pharma,
-  trading companies, heavy industry, food/beverage, retail, energy, gaming.
-- **US (`config/us.json`)** — ~100 large-cap US stocks spanning mega-cap
-  tech, financials, healthcare, energy, consumer, industrials, telecom, autos,
-  and fintech.
+- **JP (`config/default.json`)** — JPX-Nikkei Index 400 constituents (~398
+  names) across all major sectors. Refreshed from the official JPX PDF with
+  `scripts/update_jp_watchlist.py`.
+- **US (`config/us.json`)** — S&P 500 constituents (~503 names) covering the
+  full US large-cap universe. Refreshed from a maintained CSV with
+  `scripts/update_us_watchlist.py`.
 
 Edit either file to customize the watchlist, strategy parameters, and risk
 management settings.
