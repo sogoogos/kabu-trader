@@ -164,18 +164,23 @@ class Monitor:
         return Panel("\n".join(lines), title="Trading Signals", border_style="bold yellow")
 
     def _refresh_sentiment(self):
-        """Refresh LLM sentiment analysis every 6 hours.
+        """Refresh LLM sentiment analysis.
 
-        gpt-4o-mini's free-tier RPD cap (10k/day) plus 400–500 tickers per market
-        makes hourly refresh infeasible. 6h keeps us comfortably under the cap
-        while still giving fresh sentiment 4x/day.
+        Interval is configurable via config.llm_sentiment.refresh_interval_seconds
+        (default 21600 = 6 hours). Breaking-news path handles event-driven alerts
+        separately at 60s cadence, so this only affects how stale the sentiment
+        score in the composite signal can get.
         """
         if not self.llm.enabled:
             return
 
+        interval = self.config.get("llm_sentiment", {}).get(
+            "refresh_interval_seconds", 6 * 3600
+        )
+
         import time as _time
         now = _time.time()
-        if now - self._last_sentiment_time < 6 * 3600:
+        if now - self._last_sentiment_time < interval:
             return
 
         self.console.print("[bold]Refreshing news sentiment via GPT...[/bold]")

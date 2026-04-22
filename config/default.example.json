@@ -915,7 +915,8 @@
     "enabled": true,
     "api_key": "",
     "model": "gpt-4o-mini",
-    "breaking_alert_threshold": 3
+    "breaking_alert_threshold": 3,
+    "refresh_interval_seconds": 7200
   },
   "ml": {
     "forward_days": 5,
