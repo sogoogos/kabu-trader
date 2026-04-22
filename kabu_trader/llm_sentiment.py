@@ -55,6 +55,9 @@ class LLMSentimentAnalyzer:
         self.api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
         self.model = config.get("model", "gpt-4o-mini")
         self._cache: Dict[str, dict] = {}
+        # Circuit breaker: absolute timestamp until which we skip OpenAI calls.
+        # Set on 429 errors (daily rate limit). Cleared next successful call window.
+        self._rate_limited_until: float = 0.0
 
         if not self.api_key:
             print("Warning: LLM sentiment enabled but no API key. "
@@ -86,11 +89,15 @@ class LLMSentimentAnalyzer:
         if not self.enabled:
             return None
 
-        # Check cache (cache for 1 hour)
+        # Skip if we recently hit the OpenAI daily rate limit.
+        if self._rate_limited_until and time.time() < self._rate_limited_until:
+            return None
+
+        # Check cache (6h TTL — matches the refresh cadence to avoid re-analysis).
         cache_key = ticker
         if cache_key in self._cache:
             cached = self._cache[cache_key]
-            if time.time() - cached["_timestamp"] < 3600:
+            if time.time() - cached["_timestamp"] < 6 * 3600:
                 return cached
 
         # Fetch news
@@ -139,7 +146,13 @@ class LLMSentimentAnalyzer:
             return result
 
         except Exception as e:
-            print(f"LLM analysis failed for {ticker}: {e}")
+            msg = str(e)
+            if "429" in msg or "rate_limit_exceeded" in msg or "rate limit" in msg.lower():
+                # Daily RPD hit — back off until UTC midnight when quota resets.
+                self._rate_limited_until = time.time() + 60 * 60  # re-try in 1h
+                print(f"OpenAI rate limit hit — backing off for 1h. ({ticker})")
+            else:
+                print(f"LLM analysis failed for {ticker}: {e}")
             return None
 
     def analyze_multiple(
@@ -166,6 +179,11 @@ class LLMSentimentAnalyzer:
         results = {}
 
         for ticker in tickers:
+            if self._rate_limited_until and time.time() < self._rate_limited_until:
+                remaining = int(self._rate_limited_until - time.time())
+                print(f"OpenAI cooldown active — skipping {len(tickers) - len(results)} "
+                      f"remaining tickers ({remaining}s left)")
+                break
             result = self.analyze_stock(
                 ticker,
                 company_name=names.get(ticker, ""),

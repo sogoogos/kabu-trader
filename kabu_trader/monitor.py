@@ -164,13 +164,18 @@ class Monitor:
         return Panel("\n".join(lines), title="Trading Signals", border_style="bold yellow")
 
     def _refresh_sentiment(self):
-        """Refresh LLM sentiment analysis once per hour."""
+        """Refresh LLM sentiment analysis every 6 hours.
+
+        gpt-4o-mini's free-tier RPD cap (10k/day) plus 400–500 tickers per market
+        makes hourly refresh infeasible. 6h keeps us comfortably under the cap
+        while still giving fresh sentiment 4x/day.
+        """
         if not self.llm.enabled:
             return
 
         import time as _time
         now = _time.time()
-        if now - self._last_sentiment_time < 3600:
+        if now - self._last_sentiment_time < 6 * 3600:
             return
 
         self.console.print("[bold]Refreshing news sentiment via GPT...[/bold]")
