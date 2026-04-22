@@ -44,6 +44,26 @@ Be conservative. Most news is neutral (0) or slightly positive/negative (+/-1).
 Only give +/-3 or higher for genuinely significant news."""
 
 
+BATCH_SENTIMENT_PROMPT = """You are a stock market analyst. Analyze the news for each stock below and provide a sentiment assessment.
+
+{stock_blocks}
+
+Respond with a single JSON object. Each key is the ticker; each value is:
+{{
+  "score": <integer -5 to +5>,
+  "confidence": <float 0.0 to 1.0>,
+  "reasoning": "<one sentence in English>"
+}}
+
+Include ALL {count} tickers in your response. Return JSON only, no other text.
+
+Scoring guide (be conservative — most news is 0 or ±1):
+- +5/-5: major catalyst (scandal, major deal, huge beat/miss)
+- +3/-3: earnings beat/miss, upgrade/downgrade, material policy
+- +1/-1: minor news
+-    0: neutral / no clear direction"""
+
+
 class LLMSentimentAnalyzer:
     """Analyzes stock news sentiment using OpenAI API."""
 
@@ -155,41 +175,120 @@ class LLMSentimentAnalyzer:
                 print(f"LLM analysis failed for {ticker}: {e}")
             return None
 
+    def analyze_batch(
+        self,
+        ticker_news: Dict[str, tuple],
+    ) -> Dict[str, dict]:
+        """Analyze up to ~15 tickers in a single OpenAI call.
+
+        Args:
+            ticker_news: dict ticker -> (company_name, list_of_news_items)
+                news items are dicts with 'title' and 'publisher' keys.
+
+        Returns: dict ticker -> sentiment result. Tickers not in the response are omitted.
+        """
+        if not self.enabled or not ticker_news:
+            return {}
+        if self._rate_limited_until and time.time() < self._rate_limited_until:
+            return {}
+
+        # Build the prompt block per ticker.
+        blocks = []
+        for ticker, (company, news) in ticker_news.items():
+            headlines = "\n".join(
+                f"- {n['title']} ({n.get('publisher','')})" for n in news[:5]
+            ) or "- (no recent news)"
+            blocks.append(f"Ticker {ticker} ({company or ticker}):\n{headlines}")
+        prompt = BATCH_SENTIMENT_PROMPT.format(
+            stock_blocks="\n\n".join(blocks),
+            count=len(ticker_news),
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+            )
+            text = response.choices[0].message.content.strip()
+            parsed = json.loads(text)
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg or "rate_limit_exceeded" in msg or "rate limit" in msg.lower():
+                self._rate_limited_until = time.time() + 60 * 60
+                print(f"OpenAI rate limit hit on batch — backing off for 1h")
+            else:
+                print(f"LLM batch analysis failed: {e}")
+            return {}
+
+        results: Dict[str, dict] = {}
+        now = time.time()
+        for ticker in ticker_news:
+            entry = parsed.get(ticker)
+            if not isinstance(entry, dict):
+                continue
+            score = max(-5, min(5, int(entry.get("score", 0))))
+            confidence = max(0.0, min(1.0, float(entry.get("confidence", 0.5))))
+            result = {
+                "score": score,
+                "confidence": confidence,
+                "reasoning": entry.get("reasoning", ""),
+                "key_factors": entry.get("key_factors", []),
+                "_timestamp": now,
+                "_ticker": ticker,
+            }
+            self._cache[ticker] = result
+            results[ticker] = result
+        return results
+
     def analyze_multiple(
         self,
         tickers: List[str],
         names: Dict[str, str] = None,
         prices: Dict[str, float] = None,
+        batch_size: int = 12,
     ) -> Dict[str, dict]:
-        """Analyze sentiment for multiple stocks.
+        """Analyze sentiment for many stocks, batching ~12 per OpenAI call.
 
-        Args:
-            tickers: List of stock tickers
-            names: Dict of ticker -> company name
-            prices: Dict of ticker -> current price
-
-        Returns:
-            Dict of ticker -> sentiment result
+        Tickers hitting the 6h cache short-circuit without a new API call.
+        Remaining tickers are grouped into batches of `batch_size` to minimize
+        the request count (roughly N/12 calls instead of N).
         """
         if not self.enabled:
             return {}
 
         names = names or {}
         prices = prices or {}
-        results = {}
+        results: Dict[str, dict] = {}
 
+        # Pull cache hits first so we only batch cache misses.
+        pending: List[str] = []
         for ticker in tickers:
+            cached = self._cache.get(ticker)
+            if cached and time.time() - cached["_timestamp"] < 6 * 3600:
+                results[ticker] = cached
+                continue
+            pending.append(ticker)
+
+        if not pending:
+            return results
+
+        from .news_fetcher import fetch_stock_news
+
+        # Build ticker -> (company, news) for each pending ticker.
+        for i in range(0, len(pending), batch_size):
             if self._rate_limited_until and time.time() < self._rate_limited_until:
                 remaining = int(self._rate_limited_until - time.time())
-                print(f"OpenAI cooldown active — skipping {len(tickers) - len(results)} "
+                print(f"OpenAI cooldown active — skipping {len(pending) - i} "
                       f"remaining tickers ({remaining}s left)")
                 break
-            result = self.analyze_stock(
-                ticker,
-                company_name=names.get(ticker, ""),
-                price=prices.get(ticker, 0),
-            )
-            if result:
-                results[ticker] = result
+            chunk = pending[i : i + batch_size]
+            ticker_news: Dict[str, tuple] = {}
+            for ticker in chunk:
+                news = fetch_stock_news(ticker, max_items=5)
+                ticker_news[ticker] = (names.get(ticker, ""), news or [])
+            batch_result = self.analyze_batch(ticker_news)
+            results.update(batch_result)
 
         return results
