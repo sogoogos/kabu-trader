@@ -78,11 +78,17 @@ def fetch_market_news(
 
     headlines: List[dict] = []
     for item in root.iter("item"):
-        title = (item.findtext("title") or "").strip()
-        if not title:
+        raw_title = (item.findtext("title") or "").strip()
+        if not raw_title:
             continue
         source_el = item.find("source")
         publisher = (source_el.text or "").strip() if source_el is not None and source_el.text else ""
+        # Google News appends " - <publisher>" to every title. Strip it so aliases
+        # don't incorrectly match the publisher name (e.g. "Yahoo" matching
+        # "Yahoo!ニュース" on unrelated articles).
+        title = raw_title
+        if publisher and title.endswith(" - " + publisher):
+            title = title[: -len(publisher) - 3].rstrip()
         headlines.append({
             "title": title,
             "publisher": publisher,
