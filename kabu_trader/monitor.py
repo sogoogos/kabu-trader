@@ -62,6 +62,7 @@ class Monitor:
         self._sent_signals: set = set()  # track sent alerts to avoid duplicates
         self._last_sentiment_time: float = 0  # timestamp of last sentiment refresh
         self._last_earnings_time: float = 0  # timestamp of last earnings refresh
+        self._last_summary_date: str = ""  # YYYY-MM-DD of last daily summary sent
         self._last_retrain_week: int = -1  # ISO week number of last retrain
         self._seen_headlines: set = set()  # track seen news headlines
         self.paper_trader: Optional[PaperTrader] = None
@@ -210,6 +211,65 @@ class Monitor:
         self.console.print(
             f"[bold green]Earnings data updated for {len(earnings_data)} stocks[/bold green]"
         )
+
+    def _send_daily_summary(self):
+        """Send a LINE end-of-day summary of paper trading performance.
+
+        Fires once per trading day, shortly after the market closes. Uses the
+        data fetcher's cache for current prices — no extra HTTP calls.
+        """
+        if not self.line.enabled or not self.paper_trader:
+            return
+
+        now = datetime.now(self.tz)
+        today = now.strftime("%Y-%m-%d")
+        if self._last_summary_date == today:
+            return
+
+        # Only fire on weekdays after trading_hours_end.
+        if now.weekday() > 4:
+            return
+        end_h, end_m = map(int, self.monitor_config["trading_hours_end"].split(":"))
+        end_time = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+        if now < end_time:
+            return
+
+        # Build price dict from cached OHLCV (last close) — no network calls.
+        price_dict = {}
+        for ticker in self.paper_trader.positions:
+            df = self.fetcher.get_cached(ticker)
+            if df is not None and not df.empty:
+                price_dict[ticker] = float(df["Close"].iloc[-1])
+
+        summary = self.paper_trader.get_summary(price_dict)
+
+        today_trades = [
+            t for t in self.paper_trader.trade_log
+            if t.get("timestamp", "").startswith(today)
+        ]
+        buys = [t for t in today_trades if t["action"] == "BUY"]
+        sells = [t for t in today_trades if t["action"] == "SELL"]
+        day_pnl = sum(t.get("pnl", 0) for t in sells)
+
+        sym = self.currency_symbol
+        ret = summary["total_return_pct"]
+        msg = (
+            f"📊 [{self.market_name}] Daily Summary [🧪 PAPER]\n"
+            f"{'🟢' if ret >= 0 else '🔴'} Total return: {ret:+.2f}%\n"
+            f"💰 Value: {sym}{summary['total_value']:,.0f} "
+            f"(cash {sym}{summary['cash']:,.0f})\n"
+            f"📈 Today: {len(buys)} BUY / {len(sells)} SELL"
+            + (f" | realized {sym}{day_pnl:+,.0f}" if sells else "")
+            + f"\n"
+            f"📌 Positions: {summary['open_positions']}/{self.paper_trader.max_positions} open\n"
+            f"🏆 Overall: {summary['total_closed_trades']} closed trades, "
+            f"{summary['win_rate']:.0f}% win rate"
+        )
+        if self.line.send(msg):
+            self._last_summary_date = today
+            self.console.print(
+                f"[bold cyan]Daily summary sent to LINE for {self.market_name}[/bold cyan]"
+            )
 
     def _auto_retrain(self):
         """Retrain ML model once per week (Sunday night)."""
@@ -445,6 +505,13 @@ class Monitor:
                         f"{action['shares']} shares @ {sym}{price:,.2f} "
                         f"(score: {action['score']})[/bold green]"
                     )
+                    if self.line.enabled:
+                        self.line.send(
+                            f"🛒 [{self.market_name}] Paper BUY [🧪 PAPER]\n"
+                            f"🟢 {name} ({ticker})\n"
+                            f"💰 {action['shares']} shares @ {sym}{price:,.2f}\n"
+                            f"📊 Signal score: {action['score']:+d}"
+                        )
                 elif action["action"] == "SELL":
                     pnl = action["pnl"]
                     color = "green" if pnl > 0 else "red"
@@ -453,6 +520,13 @@ class Monitor:
                         f"@ {sym}{price:,.2f} | P&L: {sym}{pnl:+,.2f} "
                         f"({action['pnl_pct']:+.1f}%)[/bold {color}]"
                     )
+                    if self.line.enabled:
+                        self.line.send(
+                            f"📋 [{self.market_name}] Paper SELL [🧪 PAPER]\n"
+                            f"{'🟢' if pnl > 0 else '🔴'} {name} ({ticker})\n"
+                            f"💰 @ {sym}{price:,.2f}\n"
+                            f"📊 P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)"
+                        )
 
         # Daily snapshot
         self.paper_trader.take_daily_snapshot(price_dict, now_str)
@@ -541,6 +615,7 @@ class Monitor:
                     self._check_breaking_news()
                     self._refresh_sentiment()
                     self._refresh_earnings()
+                    self._send_daily_summary()
                     self._auto_retrain()
                     now = datetime.now(self.tz).strftime("%H:%M:%S")
                     self.console.print(
