@@ -438,8 +438,15 @@ class Monitor:
                 })
 
     def _send_line_alerts(self):
-        """Send LINE messages for new alerts (avoids duplicates within the same day)."""
+        """Send LINE messages for STRONG_BUY/STRONG_SELL signals across the watchlist.
+
+        Off by default — fires per signal regardless of whether a trade actually
+        executes, which can blow through LINE's 200 msg/month free quota fast.
+        Enable via config.line.notify_strong_signals: true if you want them.
+        """
         if not self.line.enabled:
+            return
+        if not self.config.get("line", {}).get("notify_strong_signals", False):
             return
 
         today = datetime.now(self.tz).strftime("%Y-%m-%d")
@@ -499,13 +506,17 @@ class Monitor:
             )
 
             if action:
+                # Per-trade LINE notifications can be muted to conserve LINE
+                # quota (free tier is 500 msgs/month). Daily summary + STRONG
+                # signals + breaking news fire regardless.
+                notify_trades = self.config.get("line", {}).get("notify_paper_trades", True)
                 if action["action"] == "BUY":
                     self.console.print(
                         f"[bold green]PAPER BUY: {name} ({ticker}) "
                         f"{action['shares']} shares @ {sym}{price:,.2f} "
                         f"(score: {action['score']})[/bold green]"
                     )
-                    if self.line.enabled:
+                    if notify_trades and self.line.enabled:
                         self.line.send(
                             f"🛒 [{self.market_name}] Paper BUY [🧪 PAPER]\n"
                             f"🟢 {name} ({ticker})\n"
@@ -520,7 +531,7 @@ class Monitor:
                         f"@ {sym}{price:,.2f} | P&L: {sym}{pnl:+,.2f} "
                         f"({action['pnl_pct']:+.1f}%)[/bold {color}]"
                     )
-                    if self.line.enabled:
+                    if notify_trades and self.line.enabled:
                         self.line.send(
                             f"📋 [{self.market_name}] Paper SELL [🧪 PAPER]\n"
                             f"{'🟢' if pnl > 0 else '🔴'} {name} ({ticker})\n"
