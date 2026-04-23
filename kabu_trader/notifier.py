@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from urllib.request import Request, urlopen
-from urllib.error import URLError
+from urllib.error import URLError, HTTPError
 
 
 LINE_API_URL = "https://api.line.me/v2/bot/message/push"
@@ -35,9 +36,17 @@ class LineNotifier:
             print("Warning: LINE enabled but missing channel_access_token or user_id.")
             self.enabled = False
 
+        # Circuit breaker state for 429 (rate limit / monthly cap).
+        self._rate_limited_until: float = 0.0
+
     def send(self, message: str) -> bool:
-        """Send a LINE message. Returns True on success."""
+        """Send a LINE message. Returns True on success.
+
+        Backs off silently when rate-limited so we don't burn cycles retrying.
+        """
         if not self.enabled:
+            return False
+        if self._rate_limited_until and time.time() < self._rate_limited_until:
             return False
 
         payload = json.dumps({
@@ -60,6 +69,27 @@ class LineNotifier:
         try:
             with urlopen(req) as resp:
                 return resp.status == 200
+        except HTTPError as e:
+            if e.code == 429:
+                # Try to honor Retry-After if LINE provides it; otherwise back off
+                # for an hour (covers per-minute throttle and gives monthly-cap
+                # users a chance to notice without spamming the log).
+                retry_after = e.headers.get("Retry-After") if e.headers else None
+                cooldown = 3600
+                try:
+                    if retry_after:
+                        cooldown = max(60, int(retry_after))
+                except ValueError:
+                    pass
+                self._rate_limited_until = time.time() + cooldown
+                print(
+                    f"LINE rate-limited (429) — backing off {cooldown}s. "
+                    f"Likely the free-tier monthly cap (500 msgs/month) — "
+                    f"check the LINE Developers console."
+                )
+            else:
+                print(f"LINE send failed: HTTP {e.code} {e.reason}")
+            return False
         except URLError as e:
             print(f"LINE send failed: {e}")
             return False
