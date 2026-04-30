@@ -9,6 +9,7 @@ Persists all state to disk so it survives restarts. Tracks:
 
 from __future__ import annotations
 
+import csv
 import json
 from datetime import datetime
 from pathlib import Path
@@ -127,6 +128,27 @@ class PaperTrader:
         with open(path, "w") as f:
             json.dump(state, f, indent=2, ensure_ascii=False)
 
+        self._save_trades_csv()
+
+    def _save_trades_csv(self):
+        """Mirror trade_log to a CSV next to state.json for easy spreadsheet review."""
+        if not self.trade_log:
+            return
+        fieldnames = [
+            "timestamp", "action", "ticker", "name", "price", "shares",
+            "cost", "proceeds", "entry_price", "pnl", "pnl_pct",
+            "score", "reason", "reasons", "held_since",
+        ]
+        path = self.state_dir / "trades.csv"
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for trade in self.trade_log:
+                row = dict(trade)
+                if isinstance(row.get("reasons"), list):
+                    row["reasons"] = " | ".join(row["reasons"])
+                writer.writerow(row)
+
     def process_signal(
         self,
         ticker: str,
@@ -204,8 +226,17 @@ class PaperTrader:
 
     def _buy(self, ticker: str, name: str, price: float, score: int,
              reasons: List[str], timestamp: str) -> Optional[dict]:
-        """Execute a virtual buy."""
-        position_value = self.cash * self.position_size_pct
+        """Execute a virtual buy.
+
+        Position size = initial_capital * position_size_pct (not remaining cash),
+        so each of `max_positions` slots gets the same intended budget regardless
+        of how many other slots are already filled. Falls back to remaining cash
+        as a hard ceiling if commissions have eaten too much.
+        """
+        position_value = min(
+            self.initial_capital * self.position_size_pct,
+            self.cash,
+        )
 
         lot = self.shares_per_lot
         shares = max(lot, int(position_value / price / lot) * lot)
