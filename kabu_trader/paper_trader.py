@@ -24,7 +24,8 @@ class Position:
     """An open position."""
 
     def __init__(self, ticker: str, name: str, entry_price: float, shares: int,
-                 entry_date: str, signal_score: int, reasons: List[str]):
+                 entry_date: str, signal_score: int, reasons: List[str],
+                 high_water_mark: Optional[float] = None):
         self.ticker = ticker
         self.name = name
         self.entry_price = entry_price
@@ -32,6 +33,8 @@ class Position:
         self.entry_date = entry_date
         self.signal_score = signal_score
         self.reasons = reasons
+        # Highest price seen since entry — used for trailing stop.
+        self.high_water_mark = high_water_mark if high_water_mark is not None else entry_price
 
     def current_value(self, price: float) -> float:
         return price * self.shares
@@ -53,6 +56,7 @@ class Position:
             "entry_date": self.entry_date,
             "signal_score": self.signal_score,
             "reasons": self.reasons,
+            "high_water_mark": self.high_water_mark,
         }
 
     @classmethod
@@ -62,6 +66,7 @@ class Position:
             entry_price=d["entry_price"], shares=d["shares"],
             entry_date=d["entry_date"], signal_score=d["signal_score"],
             reasons=d.get("reasons", []),
+            high_water_mark=d.get("high_water_mark"),
         )
 
 
@@ -76,6 +81,18 @@ class PaperTrader:
         self.stop_loss_pct = config.get("stop_loss_pct", 0.05)
         self.take_profit_pct = config.get("take_profit_pct", 0.15)
         self.shares_per_lot = config.get("shares_per_lot", 100)
+        # Trailing stop: once a position is up trailing_stop_activate_pct from
+        # entry, exit if price falls trailing_stop_distance_pct below the high.
+        self.trailing_stop_enabled = config.get("trailing_stop_enabled", True)
+        self.trailing_stop_activate_pct = config.get("trailing_stop_activate_pct", 0.05)
+        self.trailing_stop_distance_pct = config.get("trailing_stop_distance_pct", 0.03)
+        # Time-based exit: force-close positions held longer than this many days.
+        # 0 = disabled.
+        self.max_hold_days = config.get("max_hold_days", 30)
+        # Position rotation: when portfolio is full and a new STRONG_BUY arrives,
+        # rotate out the worst-performing held position (only if it's losing money).
+        self.rotation_enabled = config.get("rotation_enabled", True)
+        self.rotation_max_pnl_pct = config.get("rotation_max_pnl_pct", 0.0)
 
         if state_dir:
             state_path = Path(state_dir)
@@ -158,6 +175,7 @@ class PaperTrader:
         price: float,
         reasons: List[str],
         timestamp: str,
+        current_prices: Optional[Dict[str, float]] = None,
     ) -> Optional[dict]:
         """Process a trading signal. Returns trade action taken, or None.
 
@@ -179,6 +197,15 @@ class PaperTrader:
         if signal in ("STRONG_BUY", "BUY") and ticker not in self.positions:
             if len(self.positions) < self.max_positions:
                 action = self._buy(ticker, name, price, score, reasons, timestamp)
+            elif (self.rotation_enabled and signal == "STRONG_BUY"
+                  and current_prices is not None):
+                rotated = self._try_rotate(
+                    new_ticker=ticker, name=name, price=price, score=score,
+                    reasons=reasons, timestamp=timestamp,
+                    current_prices=current_prices,
+                )
+                if rotated:
+                    action = rotated
 
         # SELL signals
         elif signal in ("STRONG_SELL", "SELL") and ticker in self.positions:
@@ -186,6 +213,43 @@ class PaperTrader:
 
         self._save()
         return action
+
+    @staticmethod
+    def _parse_timestamp(ts: str) -> Optional[datetime]:
+        """Parse the trader's timestamp strings. Tolerant of seconds being absent."""
+        if not ts:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(ts, fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _try_rotate(self, new_ticker, name, price, score, reasons, timestamp,
+                    current_prices):
+        """Find the worst-performing held position and swap it out for a stronger one.
+
+        Only rotates if the held position's PnL is below `rotation_max_pnl_pct`
+        — we don't kick winners out for slightly-better signals.
+        """
+        worst = None
+        worst_pnl_pct = None
+        for held_ticker, pos in self.positions.items():
+            held_price = current_prices.get(held_ticker)
+            if held_price is None:
+                continue
+            held_pnl_pct = pos.pnl_pct(held_price) / 100.0  # back to fraction
+            if held_pnl_pct >= self.rotation_max_pnl_pct:
+                continue
+            if worst_pnl_pct is None or held_pnl_pct < worst_pnl_pct:
+                worst = (held_ticker, held_price)
+                worst_pnl_pct = held_pnl_pct
+        if not worst:
+            return None
+        old_ticker, old_price = worst
+        self._sell(old_ticker, old_price, "rotated_out", timestamp)
+        return self._buy(new_ticker, name, price, score, reasons, timestamp)
 
     def check_stop_loss_take_profit(
         self, prices: Dict[str, float], timestamp: str
@@ -201,11 +265,16 @@ class PaperTrader:
         """
         actions = []
         tickers_to_close = []
+        now = self._parse_timestamp(timestamp)
 
         for ticker, pos in self.positions.items():
             price = prices.get(ticker)
             if price is None:
                 continue
+
+            # Update high-water mark for trailing stop.
+            if price > pos.high_water_mark:
+                pos.high_water_mark = price
 
             pnl_pct = pos.pnl_pct(price)
 
@@ -213,6 +282,22 @@ class PaperTrader:
                 tickers_to_close.append((ticker, price, "stop_loss"))
             elif pnl_pct >= self.take_profit_pct * 100:
                 tickers_to_close.append((ticker, price, "take_profit"))
+            elif self.trailing_stop_enabled and pnl_pct >= self.trailing_stop_activate_pct * 100:
+                # Trailing stop has armed — exit if price drops far enough below the high.
+                trailing_floor = pos.high_water_mark * (1 - self.trailing_stop_distance_pct)
+                if price < trailing_floor:
+                    tickers_to_close.append((ticker, price, "trailing_stop"))
+                    continue
+            if self.max_hold_days > 0 and now is not None:
+                entry_dt = self._parse_timestamp(pos.entry_date)
+                if entry_dt is not None:
+                    held_days = (now - entry_dt).days
+                    if held_days >= self.max_hold_days:
+                        # Avoid duplicate close entries.
+                        if not any(t[0] == ticker for t in tickers_to_close):
+                            tickers_to_close.append(
+                                (ticker, price, f"time_exit_{held_days}d")
+                            )
 
         for ticker, price, reason in tickers_to_close:
             action = self._sell(ticker, price, reason, timestamp)

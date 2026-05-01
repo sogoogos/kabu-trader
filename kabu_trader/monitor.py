@@ -502,7 +502,7 @@ class Monitor:
             action = self.paper_trader.process_signal(
                 ticker=ticker, name=name, signal=alert["signal"],
                 score=alert["score"], price=price, reasons=alert["reasons"],
-                timestamp=now_str,
+                timestamp=now_str, current_prices=price_dict,
             )
 
             if action:
