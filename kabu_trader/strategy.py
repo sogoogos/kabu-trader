@@ -73,6 +73,9 @@ class SwingCompositeStrategy:
         "ml": 3.0,
         "sentiment": 2.5,
         "earnings": 2.0,
+        # Low weight by design — only fires during earnings season when peers
+        # in the same sector have just reported. Acts as a tiebreaker.
+        "sector_spillover": 1.5,
     }
 
     def __init__(self, params: dict, benchmark_name: str = "Nikkei"):
@@ -194,6 +197,7 @@ class SwingCompositeStrategy:
             ("ml", self._score_ml, (df, i)),
             ("sentiment", self._score_sentiment, (ticker,)),
             ("earnings", self._score_earnings_surprise, (ticker,)),
+            ("sector_spillover", self._score_sector_spillover, (ticker,)),
         ]
 
         for name, scorer, args in scorers:
@@ -508,3 +512,65 @@ class SwingCompositeStrategy:
 
         direction = "beat" if gap_pct > 0 else "miss"
         return score, f"Earnings {direction} ({gap_pct:+.1f}% gap, {days_ago}d ago)"
+
+    def _score_sector_spillover(self, ticker: str) -> Tuple[float, str]:
+        """Anticipate this stock's earnings from recent peer reports in the same sector.
+
+        Looks at peer earnings within the last 5 days. Fires only when:
+        - At least 2 peers have recent (≤5d) earnings data, AND
+        - At least 60% of those reports agree on direction with |gap| > 3%.
+
+        This gives a high-conviction tiebreaker without overriding company-specific
+        factors — weight is also low (1.5) and the scorer is silent most days.
+        """
+        from .sector_groups import get_peers
+        peers = get_peers(ticker)
+        if not peers:
+            return 0, ""
+
+        # Don't double-count: skip if THIS ticker has already reported recently.
+        # Earnings-surprise scorer covers post-report; spillover anticipates pre-report.
+        own = self.earnings_data.get(ticker)
+        if own and own.get("days_ago", 999) <= 5:
+            return 0, ""
+
+        # Company-specific veto: if the LLM has flagged strongly negative news on
+        # THIS ticker (impairment, litigation, hedging issue, etc.), suppress the
+        # peer signal entirely — peer strength shouldn't mask idiosyncratic bad
+        # news. The reverse (strongly positive own-sentiment + spillover) is fine
+        # since both point the same way.
+        own_sentiment = self.sentiment_data.get(ticker, {})
+        if own_sentiment.get("score", 0) <= -3:
+            return 0, ""
+
+        recent_gaps = []
+        for peer in peers:
+            data = self.earnings_data.get(peer)
+            if not data:
+                continue
+            if data.get("days_ago", 999) > 5:
+                continue
+            recent_gaps.append(data.get("gap_pct", 0.0))
+
+        if len(recent_gaps) < 2:
+            return 0, ""
+
+        positive = [g for g in recent_gaps if g > 3]
+        negative = [g for g in recent_gaps if g < -3]
+        threshold = max(2, int(len(recent_gaps) * 0.6))
+
+        if len(positive) >= threshold:
+            avg = sum(positive) / len(positive)
+            score = min(1.0, len(positive) / 3 + min(avg, 10) / 20)
+            return score, (
+                f"Sector peers strong ({len(positive)}/{len(recent_gaps)} reported "
+                f"+{avg:.1f}% avg)"
+            )
+        if len(negative) >= threshold:
+            avg = sum(negative) / len(negative)
+            score = max(-1.0, -(len(negative) / 3 + min(abs(avg), 10) / 20))
+            return score, (
+                f"Sector peers weak ({len(negative)}/{len(recent_gaps)} reported "
+                f"{avg:.1f}% avg)"
+            )
+        return 0, ""
