@@ -90,9 +90,13 @@ class PaperTrader:
         # 0 = disabled.
         self.max_hold_days = config.get("max_hold_days", 30)
         # Position rotation: when portfolio is full and a new STRONG_BUY arrives,
-        # rotate out the worst-performing held position (only if it's losing money).
+        # rotate out the worst-performing held position. Only fires for positions
+        # that have been held long enough to develop AND are clearly losing —
+        # otherwise rotation churns through every new STRONG_BUY signal at trivial
+        # negative P&L (the active US trading universe generates many candidates).
         self.rotation_enabled = config.get("rotation_enabled", True)
-        self.rotation_max_pnl_pct = config.get("rotation_max_pnl_pct", 0.0)
+        self.rotation_max_pnl_pct = config.get("rotation_max_pnl_pct", -0.02)
+        self.rotation_min_hold_hours = config.get("rotation_min_hold_hours", 24)
         # Re-entry cooldown: don't re-buy the same ticker for N days after any exit.
         # Without this, a take-profit / trailing-stop exit immediately re-opens
         # the position because the composite score is still bullish.
@@ -238,15 +242,26 @@ class PaperTrader:
                     current_prices):
         """Find the worst-performing held position and swap it out for a stronger one.
 
-        Only rotates if the held position's PnL is below `rotation_max_pnl_pct`
-        — we don't kick winners out for slightly-better signals.
+        Two guards prevent churn:
+        - `rotation_max_pnl_pct` — only rotate clear losers (default -2%, not just
+          any red position).
+        - `rotation_min_hold_hours` — don't rotate positions just opened; they
+          need time to develop (default 24h).
         """
+        now_dt = self._parse_timestamp(timestamp)
         worst = None
         worst_pnl_pct = None
         for held_ticker, pos in self.positions.items():
             held_price = current_prices.get(held_ticker)
             if held_price is None:
                 continue
+            # Min-hold check: skip positions opened recently.
+            if self.rotation_min_hold_hours > 0 and now_dt is not None:
+                entry_dt = self._parse_timestamp(pos.entry_date)
+                if entry_dt is not None:
+                    held_hours = (now_dt - entry_dt).total_seconds() / 3600
+                    if held_hours < self.rotation_min_hold_hours:
+                        continue
             held_pnl_pct = pos.pnl_pct(held_price) / 100.0  # back to fraction
             if held_pnl_pct >= self.rotation_max_pnl_pct:
                 continue
