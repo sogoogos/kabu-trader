@@ -1105,7 +1105,8 @@
     "trailing_stop_distance_pct": 0.03,
     "max_hold_days": 30,
     "rotation_enabled": true,
-    "rotation_max_pnl_pct": 0.0,
+    "rotation_max_pnl_pct": -0.02,
+    "rotation_min_hold_hours": 24,
     "reentry_cooldown_days": 1,
     "lookback_days": 365,
     "shares_per_lot": 1
