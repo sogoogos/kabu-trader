@@ -926,6 +926,7 @@
     "max_hold_days": 30,
     "rotation_enabled": true,
     "rotation_max_pnl_pct": 0.0,
+    "reentry_cooldown_days": 1,
     "lookback_days": 365,
     "shares_per_lot": 100
   },

@@ -93,6 +93,10 @@ class PaperTrader:
         # rotate out the worst-performing held position (only if it's losing money).
         self.rotation_enabled = config.get("rotation_enabled", True)
         self.rotation_max_pnl_pct = config.get("rotation_max_pnl_pct", 0.0)
+        # Re-entry cooldown: don't re-buy the same ticker for N days after any exit.
+        # Without this, a take-profit / trailing-stop exit immediately re-opens
+        # the position because the composite score is still bullish.
+        self.reentry_cooldown_days = config.get("reentry_cooldown_days", 1)
 
         if state_dir:
             state_path = Path(state_dir)
@@ -107,6 +111,8 @@ class PaperTrader:
         self.positions: Dict[str, Position] = {}
         self.trade_log: List[dict] = []
         self.daily_snapshots: List[dict] = []
+        # ticker -> ISO timestamp of last exit (for re-entry cooldown).
+        self.last_exit: Dict[str, str] = {}
 
         self._load()
 
@@ -130,6 +136,7 @@ class PaperTrader:
         }
         self.trade_log = state.get("trade_log", [])
         self.daily_snapshots = state.get("daily_snapshots", [])
+        self.last_exit = state.get("last_exit", {})
 
     def _save(self):
         """Save state to disk."""
@@ -139,6 +146,7 @@ class PaperTrader:
             "positions": {k: v.to_dict() for k, v in self.positions.items()},
             "trade_log": self.trade_log,
             "daily_snapshots": self.daily_snapshots,
+            "last_exit": self.last_exit,
         }
 
         path = self._state_path()
@@ -317,7 +325,21 @@ class PaperTrader:
         so each of `max_positions` slots gets the same intended budget regardless
         of how many other slots are already filled. Falls back to remaining cash
         as a hard ceiling if commissions have eaten too much.
+
+        Refuses to re-buy a ticker within `reentry_cooldown_days` of its last
+        exit, to prevent take-profit / trailing-stop exits from immediately
+        re-opening the same position.
         """
+        if self.reentry_cooldown_days > 0:
+            last = self.last_exit.get(ticker)
+            if last:
+                last_dt = self._parse_timestamp(last)
+                now_dt = self._parse_timestamp(timestamp)
+                if last_dt and now_dt:
+                    days_since = (now_dt - last_dt).total_seconds() / 86400
+                    if days_since < self.reentry_cooldown_days:
+                        return None
+
         position_value = min(
             self.initial_capital * self.position_size_pct,
             self.cash,
@@ -382,6 +404,7 @@ class PaperTrader:
         }
         self.trade_log.append(trade)
         del self.positions[ticker]
+        self.last_exit[ticker] = timestamp
         return trade
 
     def take_daily_snapshot(self, prices: Dict[str, float], timestamp: str):
