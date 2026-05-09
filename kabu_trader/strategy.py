@@ -76,6 +76,9 @@ class SwingCompositeStrategy:
         # Low weight by design — only fires during earnings season when peers
         # in the same sector have just reported. Acts as a tiebreaker.
         "sector_spillover": 1.5,
+        # Detects institutional accumulation/distribution from multi-day volume
+        # vs price-action divergence. Modifier-style — low weight.
+        "accumulation": 1.5,
     }
 
     def __init__(self, params: dict, benchmark_name: str = "Nikkei"):
@@ -198,6 +201,7 @@ class SwingCompositeStrategy:
             ("sentiment", self._score_sentiment, (ticker,)),
             ("earnings", self._score_earnings_surprise, (ticker,)),
             ("sector_spillover", self._score_sector_spillover, (ticker,)),
+            ("accumulation", self._score_accumulation, (df, i)),
         ]
 
         for name, scorer, args in scorers:
@@ -298,6 +302,59 @@ class SwingCompositeStrategy:
         if position >= 0.8:
             return -0.5, f"Price near upper Bollinger Band ({position:.2f})"
 
+        return 0, ""
+
+    def _score_accumulation(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
+        """Detect multi-day institutional accumulation / distribution.
+
+        Volume spike + flat price = informed flow being absorbed (bullish
+        accumulation). Volume spike + falling price = distribution (bearish).
+        Volume spike + sharp move = already-priced-in news, no edge → 0.
+
+        This complements the single-day `_score_volume` by looking at a 5-day
+        window vs 20-day baseline.
+        """
+        if i < 25:
+            return 0, ""
+
+        vol_5d = df["Volume"].iloc[i - 4:i + 1].mean()
+        vol_20d = df["Volume"].iloc[i - 19:i + 1].mean()
+        if vol_20d <= 0 or pd.isna(vol_5d) or pd.isna(vol_20d):
+            return 0, ""
+
+        vol_ratio = vol_5d / vol_20d
+        if vol_ratio < 1.2:
+            return 0, ""
+
+        price_now = df["Close"].iloc[i]
+        price_5d_ago = df["Close"].iloc[i - 5]
+        if pd.isna(price_now) or pd.isna(price_5d_ago) or price_5d_ago <= 0:
+            return 0, ""
+
+        price_change_pct = (price_now - price_5d_ago) / price_5d_ago * 100
+
+        # Calibrated against real data: 1.2x → 0, 1.5x → 0.6, 1.7x+ → 1.0.
+        # Real institutional accumulation often shows 1.3–1.5x, not 2x+.
+        magnitude = min(1.0, (vol_ratio - 1.2) / 0.5)
+
+        # Bullish accumulation: high volume + flat-to-modestly-up price.
+        if -2.0 <= price_change_pct <= 5.0:
+            return magnitude, (
+                f"Accumulation: 5d vol {vol_ratio:.1f}x baseline, price "
+                f"{price_change_pct:+.1f}% over 5d"
+            )
+
+        # Bearish distribution: high volume + falling price.
+        # Empirically less reliable than accumulation (retail panic on volume
+        # often gets bought by institutions and bounces). Halved + stricter
+        # threshold (-3% vs -2% for bullish) to reduce false positives.
+        if price_change_pct < -3.0:
+            return -magnitude * 0.5, (
+                f"Distribution: 5d vol {vol_ratio:.1f}x baseline, price "
+                f"{price_change_pct:+.1f}% over 5d"
+            )
+
+        # High volume + already-moved (>5% up) = news priced in, no edge.
         return 0, ""
 
     def _score_volume(self, df: pd.DataFrame, i: int) -> Tuple[float, str]:
