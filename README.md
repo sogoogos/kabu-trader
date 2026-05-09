@@ -202,6 +202,8 @@ The system combines 11 indicators into a weighted composite score. Each indicato
 | 10 | ML Model (Gradient Boosting) | Predicted probability of +1.5% in 5 days | 3.0 |
 | 11 | LLM News Sentiment (GPT) | News headline analysis | 2.5 |
 | 12 | Earnings Surprise | Close-to-close gap around most recent earnings (14-day decay) | 2.0 |
+| 13 | Sector Spillover | Anticipates own earnings from peer reports in the same sector group | 1.5 |
+| 14 | Accumulation | Multi-day volume vs price divergence (institutional accumulation/distribution) | 1.5 |
 
 Default weights are based on ML feature importance analysis. Higher weight = more influence on the final score.
 
@@ -222,7 +224,9 @@ Edit `indicator_weights` in `config/default.json` to tune. Set a weight to `0` t
   "relative_strength": 2.5,
   "ml": 3.0,
   "sentiment": 2.5,
-  "earnings": 2.0
+  "earnings": 2.0,
+  "sector_spillover": 1.5,
+  "accumulation": 1.5
 }
 ```
 
@@ -272,11 +276,21 @@ Or use environment variable: `export OPENAI_API_KEY="sk-..."`
 | Parameter | Default | Description |
 |---|---|---|
 | `initial_capital` | 1,000,000 | Starting capital in JPY |
-| `position_size_pct` | 0.10 | 10% of capital per trade |
+| `position_size_pct` | 0.10 | 10% of capital per trade (sized off initial capital, not remaining cash) |
 | `max_positions` | 5 | Maximum concurrent open positions |
-| `stop_loss_pct` | 0.05 | -5% stop loss |
+| `stop_loss_pct` | 0.05 | -5% hard stop loss |
 | `take_profit_pct` | 0.15 | +15% take profit |
 | `commission_rate` | 0.001 | 0.1% commission per trade |
+| `trailing_stop_enabled` | `true` | Once a position is up `activate_pct`, exit if price falls `distance_pct` below the high |
+| `trailing_stop_activate_pct` | 0.05 | Trailing stop arms after +5% gain |
+| `trailing_stop_distance_pct` | 0.03 | Exits if price drops 3% below the high-water mark |
+| `max_hold_days` | 30 | Force-close positions held longer than N days (`0` to disable) |
+| `rotation_enabled` | `true` | When portfolio is full, swap losing positions for stronger STRONG_BUY signals |
+| `rotation_max_pnl_pct` | -0.02 | Only rotate positions losing more than 2% (avoids churn) |
+| `rotation_min_hold_hours` | 24 | New positions are protected from rotation for 24h |
+| `reentry_cooldown_days` | 1 | Don't re-buy a ticker for N days after exit (prevents take-profit / stop-loss re-entry churn) |
+
+Every paper trade is also written to `paper_trading*/trades.csv` for spreadsheet review.
 
 ## Default Watchlists
 
