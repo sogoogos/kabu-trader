@@ -422,6 +422,64 @@ class PaperTrader:
         self.last_exit[ticker] = timestamp
         return trade
 
+    def apply_corporate_actions(self, actions_by_ticker: Dict[str, dict]) -> List[dict]:
+        """Adjust held positions for splits and dividends that occurred post-entry.
+
+        For each split: divide entry_price and high-water mark by the split ratio,
+        and multiply shares by it (so position economic value is preserved).
+        For each dividend: credit `amount × shares` to cash AND subtract the
+        per-share amount from entry_price (so the ex-div price drop doesn't trip
+        the stop-loss).
+
+        Each adjustment is logged to trade_log so it shows up in trades.csv.
+        Returns the list of adjustments applied.
+        """
+        applied: List[dict] = []
+        for ticker, actions in actions_by_ticker.items():
+            pos = self.positions.get(ticker)
+            if not pos:
+                continue
+            for split in actions.get("splits", []):
+                ratio = float(split["ratio"])
+                if ratio <= 0:
+                    continue
+                pos.entry_price = pos.entry_price / ratio
+                pos.shares = int(round(pos.shares * ratio))
+                pos.high_water_mark = pos.high_water_mark / ratio
+                entry = {
+                    "action": "ADJUST_SPLIT",
+                    "ticker": ticker,
+                    "name": pos.name,
+                    "price": pos.entry_price,
+                    "shares": pos.shares,
+                    "reason": f"split {ratio:g}:1",
+                    "timestamp": split["date"] + " 00:00:00",
+                }
+                self.trade_log.append(entry)
+                applied.append(entry)
+            for div in actions.get("dividends", []):
+                amount = float(div["amount"])
+                if amount <= 0:
+                    continue
+                proceeds = amount * pos.shares
+                self.cash += proceeds
+                pos.entry_price = max(0.01, pos.entry_price - amount)
+                entry = {
+                    "action": "DIVIDEND",
+                    "ticker": ticker,
+                    "name": pos.name,
+                    "price": amount,
+                    "shares": pos.shares,
+                    "proceeds": proceeds,
+                    "reason": f"dividend {amount:.4f}/share × {pos.shares} = {proceeds:.2f}",
+                    "timestamp": div["date"] + " 00:00:00",
+                }
+                self.trade_log.append(entry)
+                applied.append(entry)
+        if applied:
+            self._save()
+        return applied
+
     def take_daily_snapshot(self, prices: Dict[str, float], timestamp: str):
         """Record daily portfolio value."""
         open_value = sum(
