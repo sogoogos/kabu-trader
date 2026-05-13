@@ -24,6 +24,7 @@ from .strategy import SwingCompositeStrategy, Signal
 from .notifier import LineNotifier
 from .llm_sentiment import LLMSentimentAnalyzer
 from .earnings_tracker import EarningsTracker
+from .corporate_actions import CorporateActionsTracker
 from .paper_trader import PaperTrader
 
 
@@ -58,11 +59,13 @@ class Monitor:
         )
         self.llm = LLMSentimentAnalyzer(config.get("llm_sentiment", {}))
         self.earnings = EarningsTracker()
+        self.corporate_actions = CorporateActionsTracker()
         self.config = config
         self._sent_signals: set = set()  # track sent alerts to avoid duplicates
         self._last_sentiment_time: float = 0  # timestamp of last sentiment refresh
         self._last_earnings_time: float = 0  # timestamp of last earnings refresh
         self._last_summary_date: str = ""  # YYYY-MM-DD of last daily summary sent
+        self._last_actions_check: float = 0  # timestamp of last corporate-actions check
         self._last_retrain_week: int = -1  # ISO week number of last retrain
         self._seen_headlines: set = set()  # track seen news headlines
         self.paper_trader: Optional[PaperTrader] = None
@@ -211,6 +214,45 @@ class Monitor:
         self.console.print(
             f"[bold green]Earnings data updated for {len(earnings_data)} stocks[/bold green]"
         )
+
+    def _check_corporate_actions(self):
+        """Apply any splits/dividends that occurred for held positions.
+
+        Runs weekly. Only iterates positions we actually hold (typically ≤10),
+        so the yfinance call volume is trivial.
+        """
+        if not self.paper_trader or not self.paper_trader.positions:
+            return
+        import time as _time
+        now = _time.time()
+        if now - self._last_actions_check < 7 * 24 * 3600:
+            return
+
+        self.console.print("[bold]Checking corporate actions for held positions...[/bold]")
+        actions_by_ticker = {}
+        for ticker, pos in self.paper_trader.positions.items():
+            result = self.corporate_actions.get_actions_since(ticker, pos.entry_date)
+            if result and (result["splits"] or result["dividends"]):
+                actions_by_ticker[ticker] = result
+
+        if actions_by_ticker:
+            applied = self.paper_trader.apply_corporate_actions(actions_by_ticker)
+            sym = self.currency_symbol
+            for entry in applied:
+                if entry["action"] == "ADJUST_SPLIT":
+                    self.console.print(
+                        f"[bold cyan]SPLIT applied to {entry['name']} "
+                        f"({entry['ticker']}): {entry['reason']} on {entry['timestamp'][:10]}"
+                        f" — entry now {sym}{entry['price']:.2f}, shares {entry['shares']}[/bold cyan]"
+                    )
+                elif entry["action"] == "DIVIDEND":
+                    self.console.print(
+                        f"[bold cyan]DIVIDEND credited for {entry['name']} "
+                        f"({entry['ticker']}): {sym}{entry['proceeds']:.2f} "
+                        f"({entry['reason']})[/bold cyan]"
+                    )
+
+        self._last_actions_check = now
 
     def _send_daily_summary(self):
         """Send a LINE end-of-day summary of paper trading performance.
@@ -417,6 +459,7 @@ class Monitor:
         self.alerts = []
         self._refresh_sentiment()
         self._refresh_earnings()
+        self._check_corporate_actions()
         benchmark_df = self.fetcher.fetch_benchmark(days=60)
         self.strategy.set_benchmark_data(benchmark_df)
         data = self.fetcher.fetch_multiple(self.watchlist, days=60, interval="1d")
@@ -626,6 +669,7 @@ class Monitor:
                     self._check_breaking_news()
                     self._refresh_sentiment()
                     self._refresh_earnings()
+                    self._check_corporate_actions()
                     self._send_daily_summary()
                     self._auto_retrain()
                     now = datetime.now(self.tz).strftime("%H:%M:%S")
