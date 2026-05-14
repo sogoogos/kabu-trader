@@ -73,7 +73,8 @@ class Position:
 class PaperTrader:
     """Simulates trading with virtual money. Persists state to disk."""
 
-    def __init__(self, config: dict, state_dir: Optional[Path] = None):
+    def __init__(self, config: dict, state_dir: Optional[Path] = None,
+                 live_broker: Optional["object"] = None):
         self.initial_capital = config.get("initial_capital", 1000000)
         self.commission_rate = config.get("commission_rate", 0.001)
         self.position_size_pct = config.get("position_size_pct", 0.1)
@@ -117,6 +118,11 @@ class PaperTrader:
         self.daily_snapshots: List[dict] = []
         # ticker -> ISO timestamp of last exit (for re-entry cooldown).
         self.last_exit: Dict[str, str] = {}
+
+        # Live-trading bridge. When set, _buy and _sell submit real orders
+        # via this adapter (e.g. IBKRBroker). Local state still gets updated
+        # so the trade log, summary, and notification flows work the same.
+        self.live_broker = live_broker
 
         self._load()
 
@@ -368,6 +374,21 @@ class PaperTrader:
         if cost + commission > self.cash:
             return None
 
+        # Live order routing — submit before mutating local state. If the
+        # broker rejects, we abort the local update so paper state stays
+        # consistent with the broker.
+        if self.live_broker is not None:
+            try:
+                order_result = self.live_broker.place_order(
+                    ticker=ticker, side="BUY", shares=shares, order_type="MKT",
+                )
+            except Exception as e:
+                print(f"Live BUY rejected for {ticker}: {e}")
+                return None
+            if order_result.get("status", "").lower() in ("cancelled", "rejected", "inactive"):
+                print(f"Live BUY {order_result['status']} for {ticker}")
+                return None
+
         self.cash -= cost + commission
         self.positions[ticker] = Position(
             ticker=ticker, name=name, entry_price=price,
@@ -395,6 +416,19 @@ class PaperTrader:
         pos = self.positions.get(ticker)
         if not pos:
             return None
+
+        # Live order routing — same pattern as _buy.
+        if self.live_broker is not None:
+            try:
+                order_result = self.live_broker.place_order(
+                    ticker=ticker, side="SELL", shares=pos.shares, order_type="MKT",
+                )
+            except Exception as e:
+                print(f"Live SELL rejected for {ticker}: {e}")
+                return None
+            if order_result.get("status", "").lower() in ("cancelled", "rejected", "inactive"):
+                print(f"Live SELL {order_result['status']} for {ticker}")
+                return None
 
         proceeds = price * pos.shares
         commission = proceeds * self.commission_rate

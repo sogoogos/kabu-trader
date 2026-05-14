@@ -960,5 +960,14 @@
     "enabled": true,
     "channel_access_token": "",
     "user_id": ""
+  },
+  "broker": {
+    "enabled": false,
+    "type": "ibkr",
+    "host": "127.0.0.1",
+    "port": 4002,
+    "client_id": 1,
+    "paper": true,
+    "readonly": false
   }
 }
