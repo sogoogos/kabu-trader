@@ -170,8 +170,34 @@ def cmd_monitor(args):
     if args.paper:
         from .paper_trader import PaperTrader
         state_dir = Path(market["state_dir"]) if market["state_dir"] else None
-        monitor.paper_trader = PaperTrader(config["backtest"], state_dir=state_dir)
-        monitor.line.paper_mode = True
+
+        # Optional live broker. Off by default — must be explicitly enabled in config.
+        live_broker = None
+        broker_cfg = config.get("broker", {})
+        if broker_cfg.get("enabled", False):
+            broker_type = broker_cfg.get("type", "ibkr").lower()
+            if broker_type == "ibkr":
+                from .brokers.ibkr import IBKRBroker
+                live_broker = IBKRBroker(
+                    host=broker_cfg.get("host", "127.0.0.1"),
+                    port=broker_cfg.get("port", 4002),
+                    client_id=broker_cfg.get("client_id", 1),
+                    paper=broker_cfg.get("paper", True),
+                    readonly=broker_cfg.get("readonly", False),
+                )
+                mode = "PAPER" if broker_cfg.get("paper", True) else "LIVE"
+                console.print(
+                    f"[bold red]IBKR live broker ENABLED ({mode}) — "
+                    f"orders will be submitted to {broker_cfg.get('host','127.0.0.1')}:"
+                    f"{broker_cfg.get('port',4002)}[/bold red]"
+                )
+            else:
+                console.print(f"[red]Unknown broker.type: {broker_type}[/red]")
+
+        monitor.paper_trader = PaperTrader(
+            config["backtest"], state_dir=state_dir, live_broker=live_broker,
+        )
+        monitor.line.paper_mode = True if live_broker is None else False
         summary = monitor.paper_trader.get_summary()
         sym = market["currency_symbol"]
         console.print(Panel(
