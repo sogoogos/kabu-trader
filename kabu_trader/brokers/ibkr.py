@@ -66,6 +66,9 @@ class IBKRBroker:
         self.timeout = timeout
         self._ib = IB()
         self._lock = threading.Lock()
+        # Track last successful connect so we can throttle reconnect attempts.
+        self._last_connect_attempt = 0.0
+        self._reconnect_min_interval = 30.0  # seconds
 
     # --- connection ---
 
@@ -84,8 +87,28 @@ class IBKRBroker:
                 self._ib.disconnect()
 
     def _ensure(self) -> None:
-        if not self._ib.isConnected():
-            self.connect()
+        """Connect if needed. Auto-reconnect after Gateway nightly restart.
+
+        ib_insync.IB.isConnected() returns False after Gateway drops the
+        session (which happens daily ~midnight ET due to IBKR's forced
+        logout). We attempt reconnect on the next API call but throttle to
+        avoid hammering Gateway while it's mid-restart.
+        """
+        import time
+        if self._ib.isConnected():
+            return
+        now = time.time()
+        if now - self._last_connect_attempt < self._reconnect_min_interval:
+            raise ConnectionError(
+                f"IBKR Gateway disconnected; last reconnect attempt "
+                f"{now - self._last_connect_attempt:.0f}s ago (waiting "
+                f"{self._reconnect_min_interval:.0f}s between attempts)"
+            )
+        self._last_connect_attempt = now
+        # Reset the IB instance to clear any stale event handlers / state.
+        from ib_insync import IB
+        self._ib = IB()
+        self.connect()
 
     # --- contract building ---
 
