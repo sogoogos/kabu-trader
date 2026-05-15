@@ -70,6 +70,19 @@ class Position:
         )
 
 
+_BROKER_OK_STATUSES = {"filled", "submitted", "presubmitted", "pendingsubmit"}
+
+
+def _broker_status_ok(status: str) -> bool:
+    """True when the broker considers the order live or filled.
+
+    We whitelist rather than blacklist because IBKR uses several "failure"
+    statuses (Cancelled, ApiCancelled, Rejected, Inactive, plus undocumented
+    ones), and a missed one silently desyncs local paper state from the broker.
+    """
+    return (status or "").lower() in _BROKER_OK_STATUSES
+
+
 class PaperTrader:
     """Simulates trading with virtual money. Persists state to disk."""
 
@@ -385,8 +398,8 @@ class PaperTrader:
             except Exception as e:
                 print(f"Live BUY rejected for {ticker}: {e}")
                 return None
-            if order_result.get("status", "").lower() in ("cancelled", "rejected", "inactive"):
-                print(f"Live BUY {order_result['status']} for {ticker}")
+            if not _broker_status_ok(order_result.get("status", "")):
+                print(f"Live BUY {order_result.get('status')} for {ticker} — local state not updated")
                 return None
 
         self.cash -= cost + commission
@@ -419,16 +432,28 @@ class PaperTrader:
 
         # Live order routing — same pattern as _buy.
         if self.live_broker is not None:
+            # If the broker doesn't hold this position, the SELL would open
+            # an unintended short. Skip the broker call and keep local-only
+            # bookkeeping in sync (these are legacy positions opened before
+            # the broker was wired in).
             try:
-                order_result = self.live_broker.place_order(
-                    ticker=ticker, side="SELL", shares=pos.shares, order_type="MKT",
-                )
+                broker_positions = {p["ticker"] for p in self.live_broker.get_positions()}
             except Exception as e:
-                print(f"Live SELL rejected for {ticker}: {e}")
+                print(f"Could not query broker positions before SELL {ticker}: {e}")
                 return None
-            if order_result.get("status", "").lower() in ("cancelled", "rejected", "inactive"):
-                print(f"Live SELL {order_result['status']} for {ticker}")
-                return None
+            if ticker not in broker_positions:
+                print(f"Skipping live SELL for {ticker} (not held at broker) — local-only close")
+            else:
+                try:
+                    order_result = self.live_broker.place_order(
+                        ticker=ticker, side="SELL", shares=pos.shares, order_type="MKT",
+                    )
+                except Exception as e:
+                    print(f"Live SELL rejected for {ticker}: {e}")
+                    return None
+                if not _broker_status_ok(order_result.get("status", "")):
+                    print(f"Live SELL {order_result.get('status')} for {ticker} — local state not updated")
+                    return None
 
         proceeds = price * pos.shares
         commission = proceeds * self.commission_rate
