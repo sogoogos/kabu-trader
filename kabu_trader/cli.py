@@ -216,6 +216,24 @@ def cmd_monitor(args):
         monitor.run_continuous()
 
 
+def _name_lookup(config: dict):
+    """Return a function that maps a ticker to a company name.
+
+    Handles both our local convention ("7203.T") and IBKR's bare-symbol form
+    ("7203") that comes from execution records.
+    """
+    names = config.get("watchlist_names", {})
+
+    def fn(ticker: str) -> str:
+        if ticker in names:
+            return names[ticker]
+        # IBKR fills give bare symbols ("7203"); try with .T suffix
+        if f"{ticker}.T" in names:
+            return names[f"{ticker}.T"]
+        return ""
+    return fn
+
+
 def cmd_broker(args):
     """Show the live broker account state (positions, orders, fills, cash)."""
     config = load_config(args.config)
@@ -235,6 +253,7 @@ def cmd_broker(args):
     )
     sym = market["currency_symbol"]
     mode = "PAPER" if broker_cfg.get("paper", True) else "LIVE"
+    name_of = _name_lookup(config)
 
     try:
         broker.connect()
@@ -250,9 +269,11 @@ def cmd_broker(args):
         pos = broker.get_positions()
         if pos:
             pt = Table(title="Positions")
-            pt.add_column("Ticker"); pt.add_column("Shares", justify="right"); pt.add_column("Avg cost", justify="right")
+            pt.add_column("Ticker"); pt.add_column("Name")
+            pt.add_column("Shares", justify="right"); pt.add_column("Avg cost", justify="right")
             for p in pos:
-                pt.add_row(p["ticker"], str(p["shares"]), f"{sym}{p['avg_cost']:,.2f}")
+                pt.add_row(p["ticker"], name_of(p["ticker"]), str(p["shares"]),
+                           f"{sym}{p['avg_cost']:,.2f}")
             console.print(pt)
         else:
             console.print("[dim]No open positions.[/dim]")
@@ -260,12 +281,12 @@ def cmd_broker(args):
         orders = broker.get_orders()
         if orders:
             ot = Table(title="Open orders")
-            for c in ("Order", "Ticker", "Side", "Shares", "Status", "Filled"):
+            for c in ("Order", "Ticker", "Name", "Side", "Shares", "Status", "Filled"):
                 ot.add_column(c)
             for o in orders:
                 ot.add_row(
-                    str(o["order_id"]), o["ticker"], o["side"],
-                    str(o["shares"]), o["status"], str(o["filled"]),
+                    str(o["order_id"]), o["ticker"], name_of(o["ticker"]),
+                    o["side"], str(o["shares"]), o["status"], str(o["filled"]),
                 )
             console.print(ot)
         else:
@@ -277,12 +298,13 @@ def cmd_broker(args):
         fills = [f for f in broker._ib.fills() if f.execution.time.date() == today]
         if fills:
             ft = Table(title=f"Today's fills ({today})")
-            for c in ("Time", "Ticker", "Side", "Shares", "Price"):
+            for c in ("Time", "Ticker", "Name", "Side", "Shares", "Price"):
                 ft.add_column(c)
             for f in fills:
                 ft.add_row(
                     f.execution.time.strftime("%H:%M:%S"),
                     f.contract.symbol,
+                    name_of(f.contract.symbol),
                     f.execution.side,
                     f"{int(f.execution.shares)}",
                     f"{sym}{float(f.execution.price):,.2f}",
@@ -331,20 +353,22 @@ def cmd_reconcile(args):
     local_only = set(local) - set(broker_map)
     broker_only = set(broker_map) - set(local)
 
+    name_of = _name_lookup(config)
     table = Table(title=f"Reconcile [{market['market_name']}]")
     table.add_column("Ticker")
+    table.add_column("Name")
     table.add_column("Local shares", justify="right")
     table.add_column("Broker shares", justify="right")
     table.add_column("Status")
     for t in sorted(matched):
-        table.add_row(t, str(local[t]), str(broker_map[t]), "[green]match[/green]")
+        table.add_row(t, name_of(t), str(local[t]), str(broker_map[t]), "[green]match[/green]")
     for t in sorted(mismatched):
         ls, bs = mismatched[t]
-        table.add_row(t, str(ls), str(bs), "[red]MISMATCH[/red]")
+        table.add_row(t, name_of(t), str(ls), str(bs), "[red]MISMATCH[/red]")
     for t in sorted(local_only):
-        table.add_row(t, str(local[t]), "—", "[yellow]local only[/yellow]")
+        table.add_row(t, name_of(t), str(local[t]), "—", "[yellow]local only[/yellow]")
     for t in sorted(broker_only):
-        table.add_row(t, "—", str(broker_map[t]), "[red]BROKER ONLY[/red]")
+        table.add_row(t, name_of(t), "—", str(broker_map[t]), "[red]BROKER ONLY[/red]")
     console.print(table)
 
     drift = bool(mismatched or broker_only)
@@ -356,9 +380,11 @@ def cmd_reconcile(args):
         )
         lines = [f"⚠️ Reconcile drift [{market['market_name']}]"]
         for t, (ls, bs) in mismatched.items():
-            lines.append(f"  {t}: local={ls}, broker={bs}")
+            n = name_of(t)
+            lines.append(f"  {t} {n}: local={ls}, broker={bs}".rstrip())
         for t in broker_only:
-            lines.append(f"  {t}: broker={broker_map[t]} (not in local)")
+            n = name_of(t)
+            lines.append(f"  {t} {n}: broker={broker_map[t]} (not in local)".rstrip())
         notifier.send("\n".join(lines))
         console.print("[red]Drift detected — LINE alert sent.[/red]")
         sys.exit(1)
