@@ -154,8 +154,24 @@ python3 -m kabu_trader.cli report
 # Reset paper trading state and start fresh
 python3 -m kabu_trader.cli report --reset
 
+# Show live IBKR account state — cash, positions, working orders, today's fills
+# (requires the broker block in config to be enabled; see "IBKR Live Trading Setup")
+python3 -m kabu_trader.cli broker
+
+# Reconcile local PaperTrader positions vs the live broker.
+# Sends a LINE alert (and exits 1) if there's drift on broker-held positions.
+# Good as a daily cron after market close.
+python3 -m kabu_trader.cli reconcile
+
 # Use a custom config file
 python3 -m kabu_trader.cli -c config/my_config.json backtest
+```
+
+When running through Docker, prefix any of the above with `docker compose exec kabu-trader-jp`:
+
+```bash
+docker compose exec kabu-trader-jp python -m kabu_trader.cli broker
+docker compose exec kabu-trader-jp python -m kabu_trader.cli reconcile
 ```
 
 ## Paper Trading (Dry Run)
@@ -458,9 +474,29 @@ The `kabu-trader-jp` service uses `network_mode: host` (see `docker-compose.yml`
 
 Why: IB Gateway's API enforces a TrustedIPs filter. Gateway's JVM listens IPv6 dual-stack, and an IPv4 connection from a docker bridge IP (e.g. `172.19.0.3`) is seen by Java as the IPv6-mapped form `::ffff:172.19.0.3`, which doesn't string-match the trusted-IP entry. Gateway accepts the TCP then silently closes — looks identical to a network timeout. IBC's launch script clears `JAVA_TOOL_OPTIONS` and filters out `-Djava.net.preferIPv4Stack=true` from `vmoptions`, so the IPv4-stack flag can't be forced through. Host networking sidesteps the whole problem by making the source IP `127.0.0.1` (always trusted, no IPv6 mapping).
 
+### Daily reconciliation (recommended)
+
+After each session, diff local positions against the live broker and get a LINE alert on drift:
+
+```bash
+# manual one-off
+docker compose exec kabu-trader-jp python -m kabu_trader.cli reconcile
+
+# automated: Mon–Fri at 06:30 UTC (15:30 JST, ~30 min after TSE close).
+# Amazon Linux 2023: `sudo dnf install -y cronie && sudo systemctl enable --now crond` first.
+(crontab -l 2>/dev/null; echo "30 6 * * 1-5 cd ~/kabu-trader && /usr/bin/docker compose exec -T kabu-trader-jp python -m kabu_trader.cli reconcile >> /tmp/reconcile.log 2>&1") | crontab -
+```
+
+The reconcile exits 0 when local matches broker (positions held by both with same share count). It exits 1 and pushes a LINE message when:
+
+- A ticker is in both but with different shares (real drift)
+- A ticker is at the broker but not local (broker has something we don't know about)
+
+Local-only positions (e.g. ones opened before the broker was wired in) are reported but not alerted on.
+
 ### Known gotchas
 
-- **Nightly Gateway restart (~midnight ET)** invalidates the session. There is no reconnect-on-disconnect logic yet — the next API call after a nightly restart will fail.
+- **Nightly Gateway restart (~midnight ET)** invalidates the session. The IBKRBroker auto-reconnects on the next API call (throttled to one attempt per 30s), so a single missed signal is the worst case.
 - **Paper-account 2FA push** must be approved manually on the phone every container restart. The image does not write an autorestart file.
 - **Fill price** in PaperTrader is the signal price, not the actual broker fill. Volatile names can show cents of drift. Reading back `trade.fills` to override `entry_price` is on the to-do list.
 - **`docker rm` wipes filesystem edits** inside the Gateway container (jts.ini, IBC config). For persistent custom config, use `CUSTOM_CONFIG=yes` and bind-mount the config files.
