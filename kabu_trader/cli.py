@@ -216,6 +216,84 @@ def cmd_monitor(args):
         monitor.run_continuous()
 
 
+def cmd_broker(args):
+    """Show the live broker account state (positions, orders, fills, cash)."""
+    config = load_config(args.config)
+    market = get_market_settings(config)
+    broker_cfg = config.get("broker", {})
+    if not broker_cfg.get("enabled"):
+        console.print("[yellow]broker not enabled in config[/yellow]")
+        return
+
+    from .brokers.ibkr import IBKRBroker
+    broker = IBKRBroker(
+        host=broker_cfg.get("host", "127.0.0.1"),
+        port=broker_cfg.get("port", 4002),
+        client_id=97,
+        paper=broker_cfg.get("paper", True),
+        readonly=True,
+    )
+    sym = market["currency_symbol"]
+    mode = "PAPER" if broker_cfg.get("paper", True) else "LIVE"
+
+    try:
+        broker.connect()
+
+        summary = broker.get_account_summary()
+        sum_table = Table(title=f"Account [{mode}]")
+        sum_table.add_column("Tag"); sum_table.add_column("Value", justify="right")
+        for tag in ("NetLiquidation", "TotalCashValue", "AvailableFunds", "BuyingPower"):
+            v = summary.get(tag)
+            sum_table.add_row(tag, f"{sym}{v:,.2f}" if v is not None else "—")
+        console.print(sum_table)
+
+        pos = broker.get_positions()
+        if pos:
+            pt = Table(title="Positions")
+            pt.add_column("Ticker"); pt.add_column("Shares", justify="right"); pt.add_column("Avg cost", justify="right")
+            for p in pos:
+                pt.add_row(p["ticker"], str(p["shares"]), f"{sym}{p['avg_cost']:,.2f}")
+            console.print(pt)
+        else:
+            console.print("[dim]No open positions.[/dim]")
+
+        orders = broker.get_orders()
+        if orders:
+            ot = Table(title="Open orders")
+            for c in ("Order", "Ticker", "Side", "Shares", "Status", "Filled"):
+                ot.add_column(c)
+            for o in orders:
+                ot.add_row(
+                    str(o["order_id"]), o["ticker"], o["side"],
+                    str(o["shares"]), o["status"], str(o["filled"]),
+                )
+            console.print(ot)
+        else:
+            console.print("[dim]No working orders.[/dim]")
+
+        # Recent fills (today only, by IBKR's wall clock)
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date()
+        fills = [f for f in broker._ib.fills() if f.execution.time.date() == today]
+        if fills:
+            ft = Table(title=f"Today's fills ({today})")
+            for c in ("Time", "Ticker", "Side", "Shares", "Price"):
+                ft.add_column(c)
+            for f in fills:
+                ft.add_row(
+                    f.execution.time.strftime("%H:%M:%S"),
+                    f.contract.symbol,
+                    f.execution.side,
+                    f"{int(f.execution.shares)}",
+                    f"{sym}{float(f.execution.price):,.2f}",
+                )
+            console.print(ft)
+        else:
+            console.print("[dim]No fills today.[/dim]")
+    finally:
+        broker.disconnect()
+
+
 def cmd_reconcile(args):
     """Diff local PaperTrader positions against the live broker."""
     from .paper_trader import PaperTrader
@@ -720,6 +798,13 @@ Examples:
         help="Diff local positions vs broker; LINE-alert on drift",
     )
     rc.set_defaults(func=cmd_reconcile)
+
+    # Broker status
+    br = subparsers.add_parser(
+        "broker",
+        help="Show live broker account state (positions, orders, fills, cash)",
+    )
+    br.set_defaults(func=cmd_broker)
 
     args = parser.parse_args()
 
