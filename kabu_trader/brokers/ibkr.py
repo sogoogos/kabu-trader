@@ -93,13 +93,16 @@ class IBKRBroker:
     def _make_contract(ticker: str):
         """Translate our ticker conventions to ib_insync.Stock contracts.
 
-        - "7203.T" → TSEJ (Tokyo Stock Exchange), JPY
+        - "7203.T" → SMART routing with primaryExchange=TSEJ, JPY
         - "BRK-B"  → SMART, USD  (preserves dash; IBKR accepts it for class shares)
         - "AAPL"   → SMART, USD
+
+        Note: direct-routing (exchange='TSEJ') gets rejected by Gateway's
+        precautionary settings ("Error 10311"). SMART routing avoids that.
         """
         from ib_insync import Stock
         if ticker.endswith(".T"):
-            return Stock(ticker[:-2], "TSEJ", "JPY")
+            return Stock(ticker[:-2], "SMART", "JPY", primaryExchange="TSEJ")
         return Stock(ticker, "SMART", "USD")
 
     # --- orders ---
@@ -222,6 +225,7 @@ class IBKRBroker:
 
 def _ticker_from_contract(contract) -> str:
     """Map an IBKR Contract back to our ticker convention (.T suffix for TSE)."""
-    if contract.exchange == "TSEJ" or contract.primaryExchange == "TSEJ":
+    if (contract.exchange == "TSEJ" or contract.primaryExchange == "TSEJ"
+            or contract.currency == "JPY"):
         return f"{contract.symbol}.T"
     return contract.symbol
