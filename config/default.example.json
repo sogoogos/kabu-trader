@@ -915,7 +915,7 @@
   },
   "backtest": {
     "initial_capital": 1000000,
-    "commission_rate": 0.001,
+    "commission_rate": 0.0005,
     "position_size_pct": 0.1,
     "max_positions": 5,
     "stop_loss_pct": 0.05,

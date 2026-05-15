@@ -401,6 +401,8 @@ The `IBKRBroker` adapter (`kabu_trader/brokers/ibkr.py`) lets the trader submit 
 | 2 | true | true | false | 4002 | Submit paper orders to Gateway |
 | 3 | true | false | false | 4001 | LIVE — real money. Only after stage 2 has run cleanly for several sessions. |
 
+For the Stage 3 transition (funding, permissions, sizing, smoke test, rollback), see [docs/GO_LIVE.md](docs/GO_LIVE.md).
+
 ### 1. Open accounts and install IB Gateway
 
 1. Open an IBKR Japan account (covers both JP/TSE and US markets via one API)
