@@ -404,7 +404,21 @@ Then start Gateway with `--network host` so it listens on the host's port 4002:
 
 ```bash
 docker run -d --name ib-gateway --restart unless-stopped --network host \
-  --env-file ~/.ibkr.env -e TRADING_MODE=paper -e READ_ONLY_API=yes \
+  --env-file ~/.ibkr.env -e TRADING_MODE=paper \
+  -e READ_ONLY_API=yes \
+  -e EXISTING_SESSION_DETECTED_ACTION=primary \
+  gnzsnz/ib-gateway:stable
+```
+
+`EXISTING_SESSION_DETECTED_ACTION=primary` is **important** — without it, Gateway hangs on a modal "Existing session detected" dialog after any reconnect, and every API call hangs until someone clicks the dialog manually.
+
+For stage 2 (placing orders), drop `READ_ONLY_API` (default is `yes`, so you must explicitly set it to `no`):
+
+```bash
+docker run -d --name ib-gateway --restart unless-stopped --network host \
+  --env-file ~/.ibkr.env -e TRADING_MODE=paper \
+  -e READ_ONLY_API=no \
+  -e EXISTING_SESSION_DETECTED_ACTION=primary \
   gnzsnz/ib-gateway:stable
 ```
 
