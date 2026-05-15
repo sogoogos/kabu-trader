@@ -216,6 +216,81 @@ def cmd_monitor(args):
         monitor.run_continuous()
 
 
+def cmd_reconcile(args):
+    """Diff local PaperTrader positions against the live broker."""
+    from .paper_trader import PaperTrader
+    from .notifier import LineNotifier
+
+    config = load_config(args.config)
+    market = get_market_settings(config)
+    broker_cfg = config.get("broker", {})
+    if not broker_cfg.get("enabled"):
+        console.print("[yellow]broker not enabled in config — nothing to reconcile[/yellow]")
+        return
+
+    state_dir = Path(market["state_dir"]) if market["state_dir"] else None
+    trader = PaperTrader(config["backtest"], state_dir=state_dir)
+    local = {t: p.shares for t, p in trader.positions.items()}
+
+    from .brokers.ibkr import IBKRBroker
+    broker = IBKRBroker(
+        host=broker_cfg.get("host", "127.0.0.1"),
+        port=broker_cfg.get("port", 4002),
+        client_id=broker_cfg.get("reconcile_client_id", 98),
+        paper=broker_cfg.get("paper", True),
+        readonly=True,
+    )
+    try:
+        broker.connect()
+        broker_positions = broker.get_positions()
+    finally:
+        broker.disconnect()
+    broker_map = {p["ticker"]: p["shares"] for p in broker_positions}
+
+    both = set(local) & set(broker_map)
+    matched = {t for t in both if local[t] == broker_map[t]}
+    mismatched = {t: (local[t], broker_map[t]) for t in both if local[t] != broker_map[t]}
+    local_only = set(local) - set(broker_map)
+    broker_only = set(broker_map) - set(local)
+
+    table = Table(title=f"Reconcile [{market['market_name']}]")
+    table.add_column("Ticker")
+    table.add_column("Local shares", justify="right")
+    table.add_column("Broker shares", justify="right")
+    table.add_column("Status")
+    for t in sorted(matched):
+        table.add_row(t, str(local[t]), str(broker_map[t]), "[green]match[/green]")
+    for t in sorted(mismatched):
+        ls, bs = mismatched[t]
+        table.add_row(t, str(ls), str(bs), "[red]MISMATCH[/red]")
+    for t in sorted(local_only):
+        table.add_row(t, str(local[t]), "—", "[yellow]local only[/yellow]")
+    for t in sorted(broker_only):
+        table.add_row(t, "—", str(broker_map[t]), "[red]BROKER ONLY[/red]")
+    console.print(table)
+
+    drift = bool(mismatched or broker_only)
+    if drift:
+        notifier = LineNotifier(
+            config.get("line", {}),
+            currency_symbol=market["currency_symbol"],
+            market_name=market["market_name"],
+        )
+        lines = [f"⚠️ Reconcile drift [{market['market_name']}]"]
+        for t, (ls, bs) in mismatched.items():
+            lines.append(f"  {t}: local={ls}, broker={bs}")
+        for t in broker_only:
+            lines.append(f"  {t}: broker={broker_map[t]} (not in local)")
+        notifier.send("\n".join(lines))
+        console.print("[red]Drift detected — LINE alert sent.[/red]")
+        sys.exit(1)
+    if local_only:
+        console.print(
+            f"[yellow]{len(local_only)} local-only position(s) "
+            "(likely pre-broker — not alerting)[/yellow]"
+        )
+
+
 def cmd_report(args):
     """Show paper trading report."""
     from .paper_trader import PaperTrader
@@ -638,6 +713,13 @@ Examples:
     rp = subparsers.add_parser("report", help="Show paper trading report")
     rp.add_argument("--reset", action="store_true", help="Reset paper trading state")
     rp.set_defaults(func=cmd_report)
+
+    # Reconcile
+    rc = subparsers.add_parser(
+        "reconcile",
+        help="Diff local positions vs broker; LINE-alert on drift",
+    )
+    rc.set_defaults(func=cmd_reconcile)
 
     args = parser.parse_args()
 
