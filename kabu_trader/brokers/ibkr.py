@@ -134,10 +134,17 @@ class IBKRBroker:
         else:
             raise ValueError(f"Unsupported order_type: {order_type}")
         order.outsideRth = outside_rth
+        order.tif = "DAY"
 
         with self._lock:
             trade = self._ib.placeOrder(contract, order)
-            self._ib.sleep(0.5)  # let the gateway round-trip
+            for _ in range(10):
+                self._ib.sleep(0.3)
+                if trade.orderStatus.status in (
+                    "Submitted", "PreSubmitted", "Filled", "Cancelled",
+                    "ApiCancelled", "Inactive",
+                ):
+                    break
         return {
             "order_id": trade.order.orderId,
             "perm_id": trade.order.permId,
