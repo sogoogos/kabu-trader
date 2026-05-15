@@ -93,13 +93,13 @@ class IBKRBroker:
     def _make_contract(ticker: str):
         """Translate our ticker conventions to ib_insync.Stock contracts.
 
-        - "7203.T" → TSE (Tokyo), JPY
+        - "7203.T" → TSEJ (Tokyo Stock Exchange), JPY
         - "BRK-B"  → SMART, USD  (preserves dash; IBKR accepts it for class shares)
         - "AAPL"   → SMART, USD
         """
         from ib_insync import Stock
         if ticker.endswith(".T"):
-            return Stock(ticker[:-2], "TSE", "JPY")
+            return Stock(ticker[:-2], "TSEJ", "JPY")
         return Stock(ticker, "SMART", "USD")
 
     # --- orders ---
@@ -222,6 +222,6 @@ class IBKRBroker:
 
 def _ticker_from_contract(contract) -> str:
     """Map an IBKR Contract back to our ticker convention (.T suffix for TSE)."""
-    if contract.exchange == "TSE" or contract.primaryExchange == "TSE":
+    if contract.exchange == "TSEJ" or contract.primaryExchange == "TSEJ":
         return f"{contract.symbol}.T"
     return contract.symbol
