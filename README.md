@@ -373,6 +373,84 @@ export LINE_USER_ID="Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 - Each signal is sent only once per day per stock (no duplicate messages)
 - Alerts work in both `monitor` and `monitor --once` modes
 
+## IBKR Live Trading Setup
+
+The `IBKRBroker` adapter (`kabu_trader/brokers/ibkr.py`) lets the trader submit real orders to Interactive Brokers. It is **disabled by default** — paper trading still runs as the accounting layer; when `broker.enabled: true`, real orders are submitted before the local paper-state mutation.
+
+### Recommended rollout
+
+| Stage | `enabled` | `paper` | `readonly` | port | What it does |
+|---|---|---|---|---|---|
+| 1 | true | true | true | 4002 | Connect to paper Gateway, no orders |
+| 2 | true | true | false | 4002 | Submit paper orders to Gateway |
+| 3 | true | false | false | 4001 | LIVE — real money. Only after stage 2 has run cleanly for several sessions. |
+
+### 1. Open accounts and install IB Gateway
+
+1. Open an IBKR Japan account (covers both JP/TSE and US markets via one API)
+2. Once your live account is approved, you also get a **paper account** with simulated $1M — use it for stages 1 and 2
+3. The Gateway runs in Docker on your server (the [`gnzsnz/ib-gateway`](https://github.com/gnzsnz/ib-gateway-docker) image)
+
+### 2. Credentials and run Gateway
+
+Put your **paper** credentials in `~/.ibkr.env` (chmod 600):
+
+```
+TWS_USERID=your_paper_username
+TWS_PASSWORD=your_paper_password
+```
+
+Then start Gateway with `--network host` so it listens on the host's port 4002:
+
+```bash
+docker run -d --name ib-gateway --restart unless-stopped --network host \
+  --env-file ~/.ibkr.env -e TRADING_MODE=paper -e READ_ONLY_API=yes \
+  gnzsnz/ib-gateway:stable
+```
+
+**Approve 2FA on the IBKR mobile app** — Gateway needs this on every restart (paper login uses IB Key push). Watch for the push and tap "Approve". Verify login completed:
+
+```bash
+docker logs ib-gateway | grep "Login has completed"
+```
+
+### 3. Enable in config
+
+In `config/default.json` (or `config/us.json`):
+
+```json
+"broker": {
+  "enabled": true,
+  "type": "ibkr",
+  "host": "127.0.0.1",
+  "port": 4002,
+  "client_id": 1,
+  "paper": true,
+  "readonly": true
+}
+```
+
+Smoke-test before unlocking writes:
+
+```bash
+docker compose exec kabu-trader-jp python -c "from kabu_trader.brokers.ibkr import IBKRBroker; b=IBKRBroker(host='127.0.0.1', port=4002, paper=True, readonly=True); b.connect(); print(b.get_account_summary()); b.disconnect()"
+```
+
+You should see something like `{'AvailableFunds': 1000000.0, ...}`.
+
+### Important: host network mode
+
+The `kabu-trader-jp` service uses `network_mode: host` (see `docker-compose.yml`) specifically so it connects to Gateway via `127.0.0.1:4002`. **Don't change this.**
+
+Why: IB Gateway's API enforces a TrustedIPs filter. Gateway's JVM listens IPv6 dual-stack, and an IPv4 connection from a docker bridge IP (e.g. `172.19.0.3`) is seen by Java as the IPv6-mapped form `::ffff:172.19.0.3`, which doesn't string-match the trusted-IP entry. Gateway accepts the TCP then silently closes — looks identical to a network timeout. IBC's launch script clears `JAVA_TOOL_OPTIONS` and filters out `-Djava.net.preferIPv4Stack=true` from `vmoptions`, so the IPv4-stack flag can't be forced through. Host networking sidesteps the whole problem by making the source IP `127.0.0.1` (always trusted, no IPv6 mapping).
+
+### Known gotchas
+
+- **Nightly Gateway restart (~midnight ET)** invalidates the session. There is no reconnect-on-disconnect logic yet — the next API call after a nightly restart will fail.
+- **Paper-account 2FA push** must be approved manually on the phone every container restart. The image does not write an autorestart file.
+- **Fill price** in PaperTrader is the signal price, not the actual broker fill. Volatile names can show cents of drift. Reading back `trade.fills` to override `entry_price` is on the to-do list.
+- **`docker rm` wipes filesystem edits** inside the Gateway container (jts.ini, IBC config). For persistent custom config, use `CUSTOM_CONFIG=yes` and bind-mount the config files.
+
 ## Project Structure
 
 ```
