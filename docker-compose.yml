@@ -3,6 +3,7 @@ services:
     build: .
     container_name: kabu-trader-jp
     restart: unless-stopped
+    network_mode: host
     command: ["-c", "/app/config/default.json", "monitor", "--paper"]
     volumes:
       - ./config:/app/config
