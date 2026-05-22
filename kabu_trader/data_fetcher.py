@@ -13,6 +13,14 @@ from . import rate_limit
 class DataFetcher:
     """Fetches historical and current stock data for any yfinance-supported market."""
 
+    # Class-level: after FAILURE_THRESHOLD consecutive empty fetches for the
+    # same ticker, suppress it from future batches for the rest of the process
+    # lifetime. Stops log spam and saves API quota when the watchlist contains
+    # delisted / renamed tickers. Resets on process restart.
+    _dead_tickers: set = set()
+    _failure_counts: Dict[str, int] = {}
+    FAILURE_THRESHOLD = 3
+
     def __init__(self, benchmark_ticker: str = "^N225"):
         self._cache: Dict[str, pd.DataFrame] = {}
         self.benchmark_ticker = benchmark_ticker
@@ -82,12 +90,16 @@ class DataFetcher:
             )
             return {}
 
+        live_tickers = [t for t in tickers if t not in self._dead_tickers]
+        if not live_tickers:
+            return {}
+
         end = datetime.now()
         start = end - timedelta(days=days)
 
         try:
             data = yf.download(
-                tickers=tickers,
+                tickers=live_tickers,
                 start=start,
                 end=end,
                 interval=interval,
@@ -103,7 +115,7 @@ class DataFetcher:
 
         results: Dict[str, pd.DataFrame] = {}
         has_multiindex = isinstance(data.columns, pd.MultiIndex)
-        for ticker in tickers:
+        for ticker in live_tickers:
             try:
                 if has_multiindex:
                     # group_by='ticker' puts ticker at the outer level
@@ -126,6 +138,21 @@ class DataFetcher:
                 results[ticker] = df
             except Exception:
                 continue
+
+        # Track per-ticker failures: ones we tried but got no data for.
+        for ticker in live_tickers:
+            if ticker in results:
+                self._failure_counts.pop(ticker, None)
+            else:
+                n = self._failure_counts.get(ticker, 0) + 1
+                self._failure_counts[ticker] = n
+                if n >= self.FAILURE_THRESHOLD:
+                    self._dead_tickers.add(ticker)
+                    print(
+                        f"Warning: {ticker} suppressed after {n} consecutive empty "
+                        "fetches (likely delisted; restart to retry)"
+                    )
+
         return results
 
     def fetch_current_price(self, ticker: str) -> dict:
