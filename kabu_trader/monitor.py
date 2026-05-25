@@ -70,6 +70,14 @@ class Monitor:
         self._seen_headlines: set = set()  # track seen news headlines
         self.paper_trader: Optional[PaperTrader] = None
 
+        # Broker watchdog state. The IBKR Gateway needs nightly 2FA approval;
+        # a missed approval leaves the API offline silently for hours. These
+        # track when the outage started and when we last alerted so the LINE
+        # message fires once shortly after open and then periodically — not
+        # every cycle.
+        self._broker_down_since: Optional[float] = None
+        self._broker_alerted_at: float = 0.0
+
         # Seed headlines at startup so existing news doesn't trigger alerts
         self._seed_headlines()
 
@@ -81,6 +89,64 @@ class Monitor:
             for item in items:
                 if item["title"]:
                     self._seen_headlines.add(item["title"])
+
+    def _check_broker_health(self) -> None:
+        """Watchdog: alert via LINE if the IBKR Gateway is offline during trading hours.
+
+        Silent outside trading hours so the nightly forced-logout cycle doesn't spam.
+        Sends one alert after `alert_after_seconds` of continuous downtime, then
+        repeats every `alert_repeat_seconds` so the user can't miss it. Emits a
+        recovery alert when the broker comes back.
+        """
+        broker = getattr(self.paper_trader, "live_broker", None) if self.paper_trader else None
+        if broker is None or not hasattr(broker, "is_healthy"):
+            return
+        if not self._is_trading_hours():
+            return
+
+        broker_cfg = self.config.get("broker", {})
+        alert_after = broker_cfg.get("health_alert_after_seconds", 300)
+        repeat_every = broker_cfg.get("health_alert_repeat_seconds", 1800)
+
+        ok, reason = broker.is_healthy()
+        now = time.time()
+
+        if not ok:
+            if self._broker_down_since is None:
+                self._broker_down_since = now
+                self.console.print(f"[yellow]Broker health check failed: {reason}[/yellow]")
+            downtime = now - self._broker_down_since
+            should_alert = (
+                downtime >= alert_after
+                and (self._broker_alerted_at == 0.0
+                     or now - self._broker_alerted_at >= repeat_every)
+            )
+            if should_alert:
+                mins = int(downtime / 60)
+                msg = (
+                    f"🚨 IBKR Gateway DOWN [{self.market_name}]\n"
+                    f"\n"
+                    f"API unreachable for {mins} min during trading hours.\n"
+                    f"Reason: {reason}\n"
+                    f"\n"
+                    f"Likely cause: missed 2FA approval after nightly logout.\n"
+                    f"Fix: ssh kabu-ec2 'docker restart ib-gateway' then approve\n"
+                    f"the IB Key push on your phone within 30s."
+                )
+                if self.line.send(msg):
+                    self.console.print(f"[bold red]LINE alert sent: broker down {mins}m[/bold red]")
+                self._broker_alerted_at = now
+        else:
+            if self._broker_alerted_at > 0:
+                msg = (
+                    f"✅ IBKR Gateway RECOVERED [{self.market_name}]\n"
+                    f"\n"
+                    f"API is responsive again. Trading resumed."
+                )
+                self.line.send(msg)
+                self.console.print(f"[bold green]Broker recovered; LINE alert sent[/bold green]")
+            self._broker_down_since = None
+            self._broker_alerted_at = 0.0
 
     def _is_trading_hours(self) -> bool:
         now = datetime.now(self.tz)
@@ -627,6 +693,7 @@ class Monitor:
     def run_once(self):
         """Run a single monitoring cycle and print results."""
         self.console.print("\n[bold]Fetching data...[/bold]")
+        self._check_broker_health()
         self._check_breaking_news()
         self._analyze_signals()
         self._send_line_alerts()

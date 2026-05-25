@@ -110,6 +110,22 @@ class IBKRBroker:
         self._ib = IB()
         self.connect()
 
+    def is_healthy(self) -> tuple[bool, str]:
+        """Lightweight liveness check used by the monitor watchdog.
+
+        Attempts to (re)connect if needed, then issues a small server roundtrip
+        to confirm the API is actually responsive (Gateway can be 'up' as a
+        container but stuck pre-login after a failed 2FA — TCP refused on 4002).
+        Never raises; returns (ok, reason).
+        """
+        try:
+            self._ensure()
+            with self._lock:
+                self._ib.reqCurrentTime()
+            return True, "ok"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
     # --- contract building ---
 
     @staticmethod
