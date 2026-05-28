@@ -958,6 +958,14 @@
     "channel_access_token": "",
     "user_id": ""
   },
+  "email": {
+    "enabled": false,
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 587,
+    "sender": "",
+    "recipient": "",
+    "app_password": ""
+  },
   "broker": {
     "enabled": false,
     "type": "ibkr",
