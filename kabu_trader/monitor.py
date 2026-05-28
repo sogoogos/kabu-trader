@@ -80,6 +80,13 @@ class Monitor:
         self._broker_down_since: Optional[float] = None
         self._broker_alerted_at: float = 0.0
 
+        # Per-ticker breaking-news cooldown. Different publishers recycle the
+        # same story (e.g. Micron at $1T market cap → 7 alerts in one day from
+        # different outlets). Title-level dedup doesn't catch that. Once we
+        # alert on a ticker we suppress further news alerts for that ticker
+        # until the cooldown expires.
+        self._last_news_alert_per_ticker: Dict[str, float] = {}
+
         # Seed headlines at startup so existing news doesn't trigger alerts
         self._seed_headlines()
 
@@ -504,6 +511,19 @@ class Monitor:
                 continue
             if not self.line.enabled:
                 continue
+
+            cooldown_secs = self.config.get("llm_sentiment", {}).get(
+                "alert_cooldown_seconds", 21600  # 6h default
+            )
+            now_ts = time.time()
+            last_ts = self._last_news_alert_per_ticker.get(ticker, 0.0)
+            if now_ts - last_ts < cooldown_secs:
+                remaining_min = int((cooldown_secs - (now_ts - last_ts)) / 60)
+                self.console.print(
+                    f"[dim]  → {ticker} cooldown active ({remaining_min}m left), no LINE alert[/dim]"
+                )
+                continue
+
             direction = "BULLISH" if score > 0 else "BEARISH"
             mode_tag = "🧪 PAPER" if self.paper_trader else "💹 LIVE"
             from .news_fetcher import shorten_url
@@ -526,6 +546,7 @@ class Monitor:
             if key not in self._sent_signals:
                 if self.line.send(message):
                     self._sent_signals.add(key)
+                    self._last_news_alert_per_ticker[ticker] = now_ts
                     self.console.print(
                         f"[bold yellow]LINE breaking news alert sent for {name}[/bold yellow]"
                     )
