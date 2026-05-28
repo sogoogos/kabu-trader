@@ -22,6 +22,7 @@ from rich.text import Text
 from .data_fetcher import DataFetcher
 from .strategy import SwingCompositeStrategy, Signal
 from .notifier import LineNotifier
+from .email_notifier import EmailNotifier
 from .llm_sentiment import LLMSentimentAnalyzer
 from .earnings_tracker import EarningsTracker
 from .corporate_actions import CorporateActionsTracker
@@ -57,6 +58,7 @@ class Monitor:
             currency_symbol=self.currency_symbol,
             market_name=self.market_name,
         )
+        self.email = EmailNotifier(config.get("email", {}))
         self.llm = LLMSentimentAnalyzer(config.get("llm_sentiment", {}))
         self.earnings = EarningsTracker()
         self.corporate_actions = CorporateActionsTracker()
@@ -123,6 +125,7 @@ class Monitor:
             )
             if should_alert:
                 mins = int(downtime / 60)
+                subject = f"[kabu-trader {self.market_name}] IBKR Gateway DOWN ({mins}m)"
                 msg = (
                     f"🚨 IBKR Gateway DOWN [{self.market_name}]\n"
                     f"\n"
@@ -133,18 +136,25 @@ class Monitor:
                     f"Fix: ssh kabu-ec2 'docker restart ib-gateway' then approve\n"
                     f"the IB Key push on your phone within 30s."
                 )
-                if self.line.send(msg):
-                    self.console.print(f"[bold red]LINE alert sent: broker down {mins}m[/bold red]")
+                line_ok = self.line.send(msg)
+                email_ok = self.email.send(subject, msg)
+                if line_ok or email_ok:
+                    channels = ",".join(c for c, ok in [("LINE", line_ok), ("email", email_ok)] if ok)
+                    self.console.print(
+                        f"[bold red]Broker down {mins}m alert sent via {channels}[/bold red]"
+                    )
                 self._broker_alerted_at = now
         else:
             if self._broker_alerted_at > 0:
+                subject = f"[kabu-trader {self.market_name}] IBKR Gateway RECOVERED"
                 msg = (
                     f"✅ IBKR Gateway RECOVERED [{self.market_name}]\n"
                     f"\n"
                     f"API is responsive again. Trading resumed."
                 )
                 self.line.send(msg)
-                self.console.print(f"[bold green]Broker recovered; LINE alert sent[/bold green]")
+                self.email.send(subject, msg)
+                self.console.print(f"[bold green]Broker recovered; recovery alert sent[/bold green]")
             self._broker_down_since = None
             self._broker_alerted_at = 0.0
 
