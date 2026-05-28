@@ -112,9 +112,12 @@ class LineNotifier:
             f"💰 {self.currency_symbol}{price:,.2f}",
             f"📈 Score: {score}",
         ]
-        if reasons:
+        # ML reasons are kept in scoring but hidden from LINE: they're noisy and
+        # the user has asked to keep messages focused on actionable indicators.
+        visible = [r for r in reasons if not r.startswith("ML model:")]
+        if visible:
             lines.append("")
-            for r in reasons[:3]:
+            for r in visible[:3]:
                 lines.append(f"• {r}")
 
         return "\n".join(lines)
