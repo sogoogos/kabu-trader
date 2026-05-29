@@ -99,6 +99,27 @@ class Monitor:
                 if item["title"]:
                     self._seen_headlines.add(item["title"])
 
+    def _notify(self, subject: str, message: str, force_email: bool = False) -> bool:
+        """Send an alert via LINE; fall back to email if LINE fails.
+
+        LINE's 200 msg/mo free-tier cap means routine alerts (trades, breaking
+        news, daily summary) can silently disappear once the quota is hit. The
+        email channel has no such cap, so we use it as a safety net.
+
+        - force_email=False (default): email only fires when LINE returns False.
+          Conserves email volume during normal operation.
+        - force_email=True: send via both channels regardless. Reserved for the
+          highest-priority alerts (broker watchdog) where missed delivery is
+          unacceptable.
+
+        Returns True if at least one channel succeeded.
+        """
+        line_ok = self.line.send(message)
+        if force_email or not line_ok:
+            email_ok = self.email.send(subject, message)
+            return line_ok or email_ok
+        return line_ok
+
     def _check_broker_health(self) -> None:
         """Watchdog: alert via LINE if the IBKR Gateway is offline during trading hours.
 
@@ -143,12 +164,9 @@ class Monitor:
                     f"Fix: ssh kabu-ec2 'docker restart ib-gateway' then approve\n"
                     f"the IB Key push on your phone within 30s."
                 )
-                line_ok = self.line.send(msg)
-                email_ok = self.email.send(subject, msg)
-                if line_ok or email_ok:
-                    channels = ",".join(c for c, ok in [("LINE", line_ok), ("email", email_ok)] if ok)
+                if self._notify(subject, msg, force_email=True):
                     self.console.print(
-                        f"[bold red]Broker down {mins}m alert sent via {channels}[/bold red]"
+                        f"[bold red]Broker down {mins}m alert sent[/bold red]"
                     )
                 self._broker_alerted_at = now
         else:
@@ -159,8 +177,7 @@ class Monitor:
                     f"\n"
                     f"API is responsive again. Trading resumed."
                 )
-                self.line.send(msg)
-                self.email.send(subject, msg)
+                self._notify(subject, msg, force_email=True)
                 self.console.print(f"[bold green]Broker recovered; recovery alert sent[/bold green]")
             self._broker_down_since = None
             self._broker_alerted_at = 0.0
@@ -390,10 +407,11 @@ class Monitor:
             f"🏆 Overall: {summary['total_closed_trades']} closed trades, "
             f"{summary['win_rate']:.0f}% win rate"
         )
-        if self.line.send(msg):
+        subject = f"[kabu-trader {self.market_name}] Daily summary {today}"
+        if self._notify(subject, msg):
             self._last_summary_date = today
             self.console.print(
-                f"[bold cyan]Daily summary sent to LINE for {self.market_name}[/bold cyan]"
+                f"[bold cyan]Daily summary sent for {self.market_name}[/bold cyan]"
             )
 
     def _auto_retrain(self):
@@ -438,15 +456,15 @@ class Monitor:
                 f"AUC-ROC: {metrics['auc_roc']:.3f}[/bold green]"
             )
 
-            if self.line.enabled:
-                mode_tag = "🧪 PAPER" if self.paper_trader else "💹 LIVE"
-                self.line.send(
-                    f"🤖 ML Model Retrained [{mode_tag}]\n"
-                    f"\n"
-                    f"Accuracy: {metrics['accuracy']:.3f}\n"
-                    f"AUC-ROC: {metrics['auc_roc']:.3f}\n"
-                    f"Trained on {len(data)} stocks, 2 years of data"
-                )
+            mode_tag = "🧪 PAPER" if self.paper_trader else "💹 LIVE"
+            self._notify(
+                f"[kabu-trader {self.market_name}] ML model retrained",
+                (f"🤖 ML Model Retrained [{mode_tag}]\n"
+                 f"\n"
+                 f"Accuracy: {metrics['accuracy']:.3f}\n"
+                 f"AUC-ROC: {metrics['auc_roc']:.3f}\n"
+                 f"Trained on {len(data)} stocks, 2 years of data"),
+            )
         except Exception as e:
             self.console.print(f"[red]Auto-retrain failed: {e}[/red]")
 
@@ -544,11 +562,12 @@ class Monitor:
             today = datetime.now(self.tz).strftime("%Y-%m-%d")
             key = f"{today}:news:{ticker}:{new_headlines[0]['title'][:50]}"
             if key not in self._sent_signals:
-                if self.line.send(message):
+                subject = f"[kabu-trader {self.market_name}] Breaking: {name} ({ticker}) {direction.lower()}"
+                if self._notify(subject, message):
                     self._sent_signals.add(key)
                     self._last_news_alert_per_ticker[ticker] = now_ts
                     self.console.print(
-                        f"[bold yellow]LINE breaking news alert sent for {name}[/bold yellow]"
+                        f"[bold yellow]Breaking news alert sent for {name}[/bold yellow]"
                     )
 
     def _analyze_signals(self):
@@ -584,8 +603,6 @@ class Monitor:
         executes, which can blow through LINE's 200 msg/month free quota fast.
         Enable via config.line.notify_strong_signals: true if you want them.
         """
-        if not self.line.enabled:
-            return
         if not self.config.get("line", {}).get("notify_strong_signals", False):
             return
 
@@ -597,9 +614,10 @@ class Monitor:
             if key not in self._sent_signals:
                 name = self.names.get(alert["ticker"], "")
                 message = self.line.format_alert(alert, name)
-                if self.line.send(message):
+                subject = f"[kabu-trader {self.market_name}] {alert['signal']} {name or alert['ticker']}"
+                if self._notify(subject, message):
                     self._sent_signals.add(key)
-                    self.console.print(f"[bold yellow]LINE sent for {alert['ticker']}[/bold yellow]")
+                    self.console.print(f"[bold yellow]Strong-signal alert sent for {alert['ticker']}[/bold yellow]")
 
     def _execute_paper_trades(self, prices: list):
         """Execute paper trades based on current signals and prices."""
@@ -622,14 +640,16 @@ class Monitor:
                 f"@ {sym}{action['price']:,.2f} | {action['reason']} | "
                 f"P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)[/bold {color}]"
             )
-            # Send LINE for stop loss / take profit
-            if self.line.enabled:
-                msg = (
-                    f"📋 [{self.market_name}] Trade: {action['reason'].upper()} [🧪 PAPER]\n"
-                    f"{'🟢' if pnl > 0 else '🔴'} SELL {action['name']}\n"
-                    f"💰 {sym}{action['price']:,.2f} → P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)"
-                )
-                self.line.send(msg)
+            msg = (
+                f"📋 [{self.market_name}] Trade: {action['reason'].upper()} [🧪 PAPER]\n"
+                f"{'🟢' if pnl > 0 else '🔴'} SELL {action['name']}\n"
+                f"💰 {sym}{action['price']:,.2f} → P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)"
+            )
+            subject = (
+                f"[kabu-trader {self.market_name}] {action['reason'].upper()} "
+                f"{action['name']} ({action['ticker']}) {action['pnl_pct']:+.1f}%"
+            )
+            self._notify(subject, msg)
 
         # Process signals
         for alert in self.alerts:
@@ -656,12 +676,13 @@ class Monitor:
                         f"{action['shares']} shares @ {sym}{price:,.2f} "
                         f"(score: {action['score']})[/bold green]"
                     )
-                    if notify_trades and self.line.enabled:
-                        self.line.send(
-                            f"🛒 [{self.market_name}] Paper BUY [🧪 PAPER]\n"
-                            f"🟢 {name} ({ticker})\n"
-                            f"💰 {action['shares']} shares @ {sym}{price:,.2f}\n"
-                            f"📊 Signal score: {action['score']:+d}"
+                    if notify_trades:
+                        self._notify(
+                            f"[kabu-trader {self.market_name}] Paper BUY {name} ({ticker})",
+                            (f"🛒 [{self.market_name}] Paper BUY [🧪 PAPER]\n"
+                             f"🟢 {name} ({ticker})\n"
+                             f"💰 {action['shares']} shares @ {sym}{price:,.2f}\n"
+                             f"📊 Signal score: {action['score']:+d}"),
                         )
                 elif action["action"] == "SELL":
                     pnl = action["pnl"]
@@ -671,12 +692,14 @@ class Monitor:
                         f"@ {sym}{price:,.2f} | P&L: {sym}{pnl:+,.2f} "
                         f"({action['pnl_pct']:+.1f}%)[/bold {color}]"
                     )
-                    if notify_trades and self.line.enabled:
-                        self.line.send(
-                            f"📋 [{self.market_name}] Paper SELL [🧪 PAPER]\n"
-                            f"{'🟢' if pnl > 0 else '🔴'} {name} ({ticker})\n"
-                            f"💰 @ {sym}{price:,.2f}\n"
-                            f"📊 P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)"
+                    if notify_trades:
+                        self._notify(
+                            (f"[kabu-trader {self.market_name}] Paper SELL "
+                             f"{name} ({ticker}) {action['pnl_pct']:+.1f}%"),
+                            (f"📋 [{self.market_name}] Paper SELL [🧪 PAPER]\n"
+                             f"{'🟢' if pnl > 0 else '🔴'} {name} ({ticker})\n"
+                             f"💰 @ {sym}{price:,.2f}\n"
+                             f"📊 P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)"),
                         )
 
         # Daily snapshot
