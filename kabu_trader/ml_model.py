@@ -182,8 +182,23 @@ def walk_forward_evaluate(
         if test_end <= test_start:
             break
 
-        X_train = X.iloc[:train_end]
-        y_train = y.iloc[:train_end]
+        # Purge the last `forward_days` calendar days of train. Without it,
+        # the label at a training bar at date D depends on the price at
+        # D + forward_days, which falls inside the test split — leaking the
+        # answer and inflating reported test scores. The dataset is
+        # interleaved across tickers, so the purge has to be date-based
+        # (slicing by row count would only drop ~1 day no matter how many
+        # tickers contributed rows that day).
+        purge_train_end = train_end
+        if train_end > 0 and forward_days > 0:
+            last_train_date = X.index[train_end - 1]
+            cutoff_date = last_train_date - pd.Timedelta(days=forward_days)
+            train_dates = X.index[:train_end]
+            # First row whose date is past the cutoff is where we purge from.
+            purge_train_end = int((train_dates <= cutoff_date).sum())
+
+        X_train = X.iloc[:purge_train_end]
+        y_train = y.iloc[:purge_train_end]
         X_test = X.iloc[test_start:test_end]
         y_test = y.iloc[test_start:test_end]
 
