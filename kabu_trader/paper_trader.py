@@ -25,7 +25,8 @@ class Position:
 
     def __init__(self, ticker: str, name: str, entry_price: float, shares: int,
                  entry_date: str, signal_score: int, reasons: List[str],
-                 high_water_mark: Optional[float] = None):
+                 high_water_mark: Optional[float] = None,
+                 last_adjusted_at: Optional[str] = None):
         self.ticker = ticker
         self.name = name
         self.entry_price = entry_price
@@ -35,6 +36,13 @@ class Position:
         self.reasons = reasons
         # Highest price seen since entry — used for trailing stop.
         self.high_water_mark = high_water_mark if high_water_mark is not None else entry_price
+        # Most recent date a corporate-action adjustment has been applied for
+        # this position. Defaults to entry_date so the first check looks
+        # backward to entry. After each adjustment, this is bumped to the
+        # action's date so subsequent weekly checks don't re-apply the same
+        # split or dividend (which used to compound entry_price every week
+        # the bug went undetected — see kabu_trader/monitor.py:365).
+        self.last_adjusted_at = last_adjusted_at or entry_date
 
     def current_value(self, price: float) -> float:
         return price * self.shares
@@ -57,6 +65,7 @@ class Position:
             "signal_score": self.signal_score,
             "reasons": self.reasons,
             "high_water_mark": self.high_water_mark,
+            "last_adjusted_at": self.last_adjusted_at,
         }
 
     @classmethod
@@ -67,6 +76,7 @@ class Position:
             entry_date=d["entry_date"], signal_score=d["signal_score"],
             reasons=d.get("reasons", []),
             high_water_mark=d.get("high_water_mark"),
+            last_adjusted_at=d.get("last_adjusted_at"),
         )
 
 
@@ -401,6 +411,19 @@ class PaperTrader:
             if not _broker_status_ok(order_result.get("status", "")):
                 print(f"Live BUY {order_result.get('status')} for {ticker} — local state not updated")
                 return None
+            # Prefer the broker's actual fill data over the signal-time daily
+            # close so the ledger reflects what really happened. Fall back to
+            # the signal estimate if the broker hasn't filled yet by the
+            # polling deadline (rare for MKT on liquid names).
+            fill_shares = order_result.get("filled_shares", 0) or shares
+            fill_price = order_result.get("avg_fill_price", 0) or price
+            if fill_shares != shares or abs(fill_price - price) > 1e-9:
+                print(f"Live BUY fill drift {ticker}: signal {shares}@¥{price:,.2f} → "
+                      f"fill {fill_shares}@¥{fill_price:,.2f}")
+            shares = fill_shares
+            cost = fill_price * fill_shares
+            commission = cost * self.commission_rate
+            price = fill_price
 
         self.cash -= cost + commission
         self.positions[ticker] = Position(
@@ -454,6 +477,13 @@ class PaperTrader:
                 if not _broker_status_ok(order_result.get("status", "")):
                     print(f"Live SELL {order_result.get('status')} for {ticker} — local state not updated")
                     return None
+                # Use the broker's actual fill data so realized P&L matches
+                # what really executed, not the daily-close estimate.
+                fill_price = order_result.get("avg_fill_price", 0) or price
+                if abs(fill_price - price) > 1e-9:
+                    print(f"Live SELL fill drift {ticker}: signal ¥{price:,.2f} → "
+                          f"fill ¥{fill_price:,.2f}")
+                price = fill_price
 
         proceeds = price * pos.shares
         commission = proceeds * self.commission_rate
@@ -498,6 +528,7 @@ class PaperTrader:
             pos = self.positions.get(ticker)
             if not pos:
                 continue
+            latest_action_date = pos.last_adjusted_at
             for split in actions.get("splits", []):
                 ratio = float(split["ratio"])
                 if ratio <= 0:
@@ -516,6 +547,8 @@ class PaperTrader:
                 }
                 self.trade_log.append(entry)
                 applied.append(entry)
+                if split["date"] > latest_action_date:
+                    latest_action_date = split["date"]
             for div in actions.get("dividends", []):
                 amount = float(div["amount"])
                 if amount <= 0:
@@ -535,6 +568,11 @@ class PaperTrader:
                 }
                 self.trade_log.append(entry)
                 applied.append(entry)
+                if div["date"] > latest_action_date:
+                    latest_action_date = div["date"]
+            # Bump the watermark so next week's check doesn't re-apply these.
+            if latest_action_date != pos.last_adjusted_at:
+                pos.last_adjusted_at = latest_action_date
         if applied:
             self._save()
         return applied

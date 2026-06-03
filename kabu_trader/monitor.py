@@ -362,7 +362,12 @@ class Monitor:
         self.console.print("[bold]Checking corporate actions for held positions...[/bold]")
         actions_by_ticker = {}
         for ticker, pos in self.paper_trader.positions.items():
-            result = self.corporate_actions.get_actions_since(ticker, pos.entry_date)
+            # Use last_adjusted_at instead of entry_date so each split/dividend
+            # is applied exactly once. With entry_date the same event was
+            # picked up every weekly check, compounding entry_price each time
+            # and resetting on every container restart.
+            since = getattr(pos, "last_adjusted_at", pos.entry_date)
+            result = self.corporate_actions.get_actions_since(ticker, since)
             if result and (result["splits"] or result["dividends"]):
                 actions_by_ticker[ticker] = result
 
