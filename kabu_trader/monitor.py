@@ -605,9 +605,16 @@ class Monitor:
         self._refresh_sentiment()
         self._refresh_earnings()
         self._check_corporate_actions()
-        benchmark_df = self.fetcher.fetch_benchmark(days=60)
+        # Ichimoku Senkou_B is rolling(52).max().shift(26) — needs 78 non-NaN
+        # bars before the latest. days=60 (~40 trading days) leaves Senkou_A/B
+        # NaN at the tail, which made `_score_ichimoku` silently return 0 in
+        # live even though it's the highest-weight scorer (2.5) and contributed
+        # normally during backtest/training (which fetch 365-730 days).
+        # 180 calendar days ≈ 125 trading days gives ample headroom for the
+        # 78-bar window plus weekends and holidays.
+        benchmark_df = self.fetcher.fetch_benchmark(days=180)
         self.strategy.set_benchmark_data(benchmark_df)
-        data = self.fetcher.fetch_multiple(self.watchlist, days=60, interval="1d")
+        data = self.fetcher.fetch_multiple(self.watchlist, days=180, interval="1d")
 
         for ticker, df in data.items():
             if len(df) < 30:
