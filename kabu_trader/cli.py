@@ -200,14 +200,16 @@ def cmd_monitor(args):
         monitor.line.paper_mode = True if live_broker is None else False
         summary = monitor.paper_trader.get_summary()
         sym = market["currency_symbol"]
+        is_live = live_broker is not None
+        mode_label = "Live" if is_live else "Paper"
         console.print(Panel(
-            f"Paper trading enabled [{market['market_name']}]\n"
+            f"{mode_label} trading enabled [{market['market_name']}]\n"
             f"Capital: {sym}{summary['initial_capital']:,.2f} | "
             f"Current: {sym}{summary['total_value']:,.2f} ({summary['total_return_pct']:+.2f}%)\n"
             f"Open positions: {summary['open_positions']} | "
             f"Closed trades: {summary['total_closed_trades']}",
-            title="Paper Trading",
-            border_style="bold cyan",
+            title=f"{mode_label} Trading",
+            border_style="bold red" if is_live else "bold cyan",
         ))
 
     if args.once:
@@ -421,7 +423,11 @@ def cmd_report(args):
 
     summary = trader.get_summary(price_dict)
 
-    # Header
+    # Header. Use the config's broker section to label the report as Live or
+    # Paper — the cli command can be pointed at either kind of state file.
+    broker_cfg = config.get("broker", {})
+    is_live = broker_cfg.get("enabled", False) and not broker_cfg.get("paper", True)
+    mode_label = "Live" if is_live else "Paper"
     ret = summary["total_return_pct"]
     ret_color = "green" if ret > 0 else "red"
     console.print(Panel(
@@ -433,8 +439,8 @@ def cmd_report(args):
         f"(W: {summary['winning_trades']} / L: {summary['losing_trades']} | "
         f"Win rate: {summary['win_rate']:.0f}%)\n"
         f"Total realized P&L: {sym}{summary['total_pnl']:+,.2f}",
-        title=f"Paper Trading Report [{market['market_name']}]",
-        border_style="bold cyan",
+        title=f"{mode_label} Trading Report [{market['market_name']}]",
+        border_style="bold red" if is_live else "bold cyan",
     ))
 
     # Open positions

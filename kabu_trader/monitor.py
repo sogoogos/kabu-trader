@@ -113,6 +113,23 @@ class Monitor:
                 if item["title"]:
                     self._seen_headlines.add(item["title"])
 
+    def _is_live(self) -> bool:
+        """True when the broker is wired through to a real-money IBKR account.
+
+        PaperTrader is used for the local ledger in both paper- and live-mode,
+        so its presence alone doesn't indicate live trading; the live_broker
+        attribute is what distinguishes them.
+        """
+        return bool(self.paper_trader and getattr(self.paper_trader, "live_broker", None))
+
+    @property
+    def _mode_tag(self) -> str:
+        return "💹 LIVE" if self._is_live() else "🧪 PAPER"
+
+    @property
+    def _mode_label(self) -> str:
+        return "Live" if self._is_live() else "Paper"
+
     def _notify(self, subject: str, message: str, force_email: bool = False) -> bool:
         """Send an alert via LINE; fall back to email if LINE fails.
 
@@ -410,7 +427,7 @@ class Monitor:
         sym = self.currency_symbol
         ret = summary["total_return_pct"]
         msg = (
-            f"📊 [{self.market_name}] Daily Summary [🧪 PAPER]\n"
+            f"📊 [{self.market_name}] Daily Summary [{self._mode_tag}]\n"
             f"{'🟢' if ret >= 0 else '🔴'} Total return: {ret:+.2f}%\n"
             f"💰 Value: {sym}{summary['total_value']:,.0f} "
             f"(cash {sym}{summary['cash']:,.0f})\n"
@@ -470,10 +487,9 @@ class Monitor:
                 f"AUC-ROC: {metrics['auc_roc']:.3f}[/bold green]"
             )
 
-            mode_tag = "🧪 PAPER" if self.paper_trader else "💹 LIVE"
             self._notify(
                 f"[kabu-trader {self.market_name}] ML model retrained",
-                (f"🤖 ML Model Retrained [{mode_tag}]\n"
+                (f"🤖 ML Model Retrained [{self._mode_tag}]\n"
                  f"\n"
                  f"Accuracy: {metrics['accuracy']:.3f}\n"
                  f"AUC-ROC: {metrics['auc_roc']:.3f}\n"
@@ -557,11 +573,10 @@ class Monitor:
                 continue
 
             direction = "BULLISH" if score > 0 else "BEARISH"
-            mode_tag = "🧪 PAPER" if self.paper_trader else "💹 LIVE"
             from .news_fetcher import shorten_url
             link = shorten_url(new_headlines[0].get("link", ""))
             message = (
-                f"🚨 Breaking News Alert [{mode_tag}]\n"
+                f"🚨 Breaking News Alert [{self._mode_tag}]\n"
                 f"\n"
                 f"{'🟢' if score > 0 else '🔴'} {direction} ({score:+d})\n"
                 f"📌 {name} ({ticker})\n"
@@ -655,7 +670,7 @@ class Monitor:
                 f"P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)[/bold {color}]"
             )
             msg = (
-                f"📋 [{self.market_name}] Trade: {action['reason'].upper()} [🧪 PAPER]\n"
+                f"📋 [{self.market_name}] Trade: {action['reason'].upper()} [{self._mode_tag}]\n"
                 f"{'🟢' if pnl > 0 else '🔴'} SELL {action['name']}\n"
                 f"💰 {sym}{action['price']:,.2f} → P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)"
             )
@@ -686,14 +701,14 @@ class Monitor:
                 notify_trades = self.config.get("line", {}).get("notify_paper_trades", True)
                 if action["action"] == "BUY":
                     self.console.print(
-                        f"[bold green]PAPER BUY: {name} ({ticker}) "
+                        f"[bold green]{self._mode_label.upper()} BUY: {name} ({ticker}) "
                         f"{action['shares']} shares @ {sym}{price:,.2f} "
                         f"(score: {action['score']})[/bold green]"
                     )
                     if notify_trades:
                         self._notify(
-                            f"[kabu-trader {self.market_name}] Paper BUY {name} ({ticker})",
-                            (f"🛒 [{self.market_name}] Paper BUY [🧪 PAPER]\n"
+                            f"[kabu-trader {self.market_name}] {self._mode_label} BUY {name} ({ticker})",
+                            (f"🛒 [{self.market_name}] {self._mode_label} BUY [{self._mode_tag}]\n"
                              f"🟢 {name} ({ticker})\n"
                              f"💰 {action['shares']} shares @ {sym}{price:,.2f}\n"
                              f"📊 Signal score: {action['score']:+d}"),
@@ -702,15 +717,15 @@ class Monitor:
                     pnl = action["pnl"]
                     color = "green" if pnl > 0 else "red"
                     self.console.print(
-                        f"[bold {color}]PAPER SELL: {name} ({ticker}) "
+                        f"[bold {color}]{self._mode_label.upper()} SELL: {name} ({ticker}) "
                         f"@ {sym}{price:,.2f} | P&L: {sym}{pnl:+,.2f} "
                         f"({action['pnl_pct']:+.1f}%)[/bold {color}]"
                     )
                     if notify_trades:
                         self._notify(
-                            (f"[kabu-trader {self.market_name}] Paper SELL "
+                            (f"[kabu-trader {self.market_name}] {self._mode_label} SELL "
                              f"{name} ({ticker}) {action['pnl_pct']:+.1f}%"),
-                            (f"📋 [{self.market_name}] Paper SELL [🧪 PAPER]\n"
+                            (f"📋 [{self.market_name}] {self._mode_label} SELL [{self._mode_tag}]\n"
                              f"{'🟢' if pnl > 0 else '🔴'} {name} ({ticker})\n"
                              f"💰 @ {sym}{price:,.2f}\n"
                              f"📊 P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)"),
@@ -720,9 +735,9 @@ class Monitor:
         self.paper_trader.take_daily_snapshot(price_dict, now_str)
 
     def _build_paper_panel(self, prices: list) -> Panel:
-        """Build paper trading status panel."""
+        """Build trading status panel (Paper or Live depending on broker wiring)."""
         if not self.paper_trader:
-            return Panel("[dim]Paper trading disabled[/dim]", title="Paper Trading", border_style="dim")
+            return Panel("[dim]Trading disabled[/dim]", title="Trading", border_style="dim")
 
         price_dict = {p["ticker"]: p["price"] for p in prices if p.get("price")}
         summary = self.paper_trader.get_summary(price_dict)
@@ -756,7 +771,9 @@ class Monitor:
                     f"({sym}{pnl:+,.2f} / {pnl_pct:+.1f}%)[/{color}]"
                 )
 
-        return Panel("\n".join(lines), title="Paper Trading", border_style="bold cyan")
+        panel_title = f"{self._mode_label} Trading"
+        panel_color = "bold red" if self._is_live() else "bold cyan"
+        return Panel("\n".join(lines), title=panel_title, border_style=panel_color)
 
     def run_once(self):
         """Run a single monitoring cycle and print results."""
