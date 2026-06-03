@@ -182,20 +182,27 @@ def walk_forward_evaluate(
         if test_end <= test_start:
             break
 
-        # Purge the last `forward_days` calendar days of train. Without it,
+        # Purge the last `forward_days` *trading* days of train. Without it,
         # the label at a training bar at date D depends on the price at
         # D + forward_days, which falls inside the test split — leaking the
         # answer and inflating reported test scores. The dataset is
-        # interleaved across tickers, so the purge has to be date-based
-        # (slicing by row count would only drop ~1 day no matter how many
-        # tickers contributed rows that day).
+        # interleaved across tickers, so the purge has to look at unique
+        # dates rather than row count, and forward_days is a trading-day
+        # count (create_target uses `.shift(-forward_days)` on the OHLCV
+        # frame, whose index is trading days). A calendar-day Timedelta
+        # would under-purge by ~2 days on a 5-day horizon because 5 trading
+        # days span ~7 calendar days, leaving a thin leakage band.
         purge_train_end = train_end
         if train_end > 0 and forward_days > 0:
-            last_train_date = X.index[train_end - 1]
-            cutoff_date = last_train_date - pd.Timedelta(days=forward_days)
             train_dates = X.index[:train_end]
-            # First row whose date is past the cutoff is where we purge from.
-            purge_train_end = int((train_dates <= cutoff_date).sum())
+            unique_train_dates = train_dates.unique()
+            if len(unique_train_dates) > forward_days:
+                cutoff_date = unique_train_dates[-(forward_days + 1)]
+                purge_train_end = int((train_dates <= cutoff_date).sum())
+            else:
+                # Not enough train history to keep anything after purge;
+                # skip this fold below via the y_train.unique() check.
+                purge_train_end = 0
 
         X_train = X.iloc[:purge_train_end]
         y_train = y.iloc[:purge_train_end]
