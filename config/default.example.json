@@ -929,7 +929,7 @@
     "shares_per_lot": 100
   },
   "monitor": {
-    "interval_seconds": 60,
+    "interval_seconds": 300,
     "trading_hours_start": "09:00",
     "trading_hours_end": "15:00",
     "timezone": "Asia/Tokyo"

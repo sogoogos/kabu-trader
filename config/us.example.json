@@ -1112,7 +1112,7 @@
     "shares_per_lot": 1
   },
   "monitor": {
-    "interval_seconds": 60,
+    "interval_seconds": 300,
     "trading_hours_start": "09:30",
     "trading_hours_end": "16:00",
     "timezone": "America/New_York"
