@@ -146,8 +146,14 @@ def create_target(df: pd.DataFrame, forward_days: int = 5, threshold: float = 0.
     Returns:
         Series with 0/1 labels
     """
+    # The last `forward_days` rows have no future close, so future_return is
+    # NaN. The previous implementation used `(NaN > threshold) → False →
+    # astype(int) → 0`, which silently labeled those rows as "did not rise"
+    # and fed them into training as if the answer were known. Keep them NaN
+    # so prepare_dataset's existing notna() filter drops them.
     future_return = df["Close"].shift(-forward_days) / df["Close"] - 1
-    return (future_return > threshold).astype(int)
+    target = (future_return > threshold).astype(float)
+    return target.where(future_return.notna())
 
 
 def get_feature_columns() -> list:
