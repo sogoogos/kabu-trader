@@ -330,6 +330,25 @@ class PaperTrader:
 
             pnl_pct = pos.pnl_pct(price)
 
+            # Defensive guard against unrecorded corporate actions. The corp-
+            # action check is throttled, so a 2:1 split that fires today will
+            # show as pnl_pct ≈ -50% until apply_corporate_actions runs and
+            # divides entry_price by the ratio. Without this guard, stop_loss
+            # would fire immediately on the post-split price and close the
+            # position at a fake -5%. Threshold: 5× the stop_loss_pct (e.g.,
+            # -25% when stop is -5%) — well beyond a typical daily move,
+            # safely inside split territory. Real -25% one-cycle crashes do
+            # exist but are best handled by max_hold_days / rotation_out /
+            # discretionary review rather than blind stop fire.
+            corp_action_floor = -self.stop_loss_pct * 100 * 5
+            if pnl_pct <= corp_action_floor:
+                print(
+                    f"Warning: {ticker} pnl_pct={pnl_pct:.1f}% beyond plausible "
+                    f"single-cycle move ({corp_action_floor:.0f}%); "
+                    f"suspecting unrecorded corp action, skipping stop_loss"
+                )
+                continue
+
             if pnl_pct <= -self.stop_loss_pct * 100:
                 tickers_to_close.append((ticker, price, "stop_loss"))
             elif pnl_pct >= self.take_profit_pct * 100:
@@ -414,16 +433,38 @@ class PaperTrader:
             # Prefer the broker's actual fill data over the signal-time daily
             # close so the ledger reflects what really happened. Fall back to
             # the signal estimate if the broker hasn't filled yet by the
-            # polling deadline (rare for MKT on liquid names).
-            fill_shares = order_result.get("filled_shares", 0) or shares
-            fill_price = order_result.get("avg_fill_price", 0) or price
-            if fill_shares != shares or abs(fill_price - price) > 1e-9:
-                print(f"Live BUY fill drift {ticker}: signal {shares}@¥{price:,.2f} → "
-                      f"fill {fill_shares}@¥{fill_price:,.2f}")
+            # polling deadline (rare for MKT on liquid names) — log clearly
+            # so reconcile picks up the drift.
+            raw_fill_shares = int(order_result.get("filled_shares", 0))
+            raw_fill_price = float(order_result.get("avg_fill_price", 0))
+            status = order_result.get("status", "")
+            if raw_fill_shares == 0:
+                print(f"Live BUY {ticker}: NO fill within deadline (status={status}); "
+                      f"recording {shares}@¥{price:,.2f} from signal — broker may still "
+                      f"complete the order; reconcile will reveal any drift")
+                fill_shares, fill_price = shares, price
+            elif raw_fill_shares < shares:
+                print(f"Live BUY {ticker}: PARTIAL fill {raw_fill_shares}/{shares}@¥{raw_fill_price:,.2f} "
+                      f"(status={status}); recording the filled portion only — "
+                      f"remaining {shares - raw_fill_shares} may still execute at broker")
+                fill_shares, fill_price = raw_fill_shares, raw_fill_price
+            else:
+                if abs(raw_fill_price - price) > 1e-9:
+                    print(f"Live BUY fill drift {ticker}: signal ¥{price:,.2f} → fill ¥{raw_fill_price:,.2f}")
+                fill_shares, fill_price = raw_fill_shares, raw_fill_price
             shares = fill_shares
             cost = fill_price * fill_shares
             commission = cost * self.commission_rate
             price = fill_price
+            # Re-validate against cash after the fill — slippage above the
+            # signal price can push the actual cost above the pre-check
+            # budget. Going slightly negative is harmless arithmetically
+            # but breaks the invariant that cash >= 0, which downstream
+            # reporting and reconcile rely on.
+            if cost + commission > self.cash:
+                print(f"Live BUY {ticker}: fill cost ¥{cost + commission:,.2f} "
+                      f"exceeds cash ¥{self.cash:,.2f} after slippage — "
+                      f"recording position but cash will go negative; reconcile to true up")
 
         self.cash -= cost + commission
         self.positions[ticker] = Position(
