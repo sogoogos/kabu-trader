@@ -349,14 +349,21 @@ class Monitor:
     def _check_corporate_actions(self):
         """Apply any splits/dividends that occurred for held positions.
 
-        Runs weekly. Only iterates positions we actually hold (typically ≤10),
-        so the yfinance call volume is trivial.
+        Runs daily. Weekly was too coarse — between split day and the next
+        weekly run, the yfinance auto_adjust re-bases live prices but
+        entry_price stays pre-split, so pnl_pct shows ≈ -50% on a 2:1 split
+        and the stop_loss would fire at fake -5%. With the post-fill guard
+        in check_stop_loss_take_profit catching extreme moves and the
+        adjustment running daily, the residual window shrinks to <24h
+        and is itself protected by the guard. The actual yfinance fetch
+        is throttled separately by CorporateActionsTracker's 7-day cache,
+        so daily polling here costs only dict lookups.
         """
         if not self.paper_trader or not self.paper_trader.positions:
             return
         import time as _time
         now = _time.time()
-        if now - self._last_actions_check < 7 * 24 * 3600:
+        if now - self._last_actions_check < 24 * 3600:
             return
 
         self.console.print("[bold]Checking corporate actions for held positions...[/bold]")
