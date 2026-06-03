@@ -21,6 +21,25 @@ services:
       - EMAIL_RECIPIENT=${EMAIL_RECIPIENT:-}
       - EMAIL_APP_PASSWORD=${EMAIL_APP_PASSWORD:-}
 
+  kabu-trader-jp-live:
+    build: .
+    container_name: kabu-trader-jp-live
+    restart: unless-stopped
+    network_mode: host
+    command: ["-c", "/app/config/live.json", "monitor", "--paper"]
+    volumes:
+      - ./config:/app/config
+      - ./paper_trading_live:/app/paper_trading_live
+      - ./models:/app/models
+    environment:
+      - TZ=Asia/Tokyo
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN:-}
+      - LINE_USER_ID=${LINE_USER_ID:-}
+      - EMAIL_SENDER=${EMAIL_SENDER:-}
+      - EMAIL_RECIPIENT=${EMAIL_RECIPIENT:-}
+      - EMAIL_APP_PASSWORD=${EMAIL_APP_PASSWORD:-}
+
   kabu-trader-us:
     build: .
     container_name: kabu-trader-us

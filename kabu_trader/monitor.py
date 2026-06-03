@@ -59,7 +59,21 @@ class Monitor:
             market_name=self.market_name,
         )
         self.email = EmailNotifier(config.get("email", {}))
-        self.llm = LLMSentimentAnalyzer(config.get("llm_sentiment", {}))
+        # Persist the sentiment cache under the market's state_dir so a container
+        # restart (which is otherwise routine) doesn't trigger a 5-10 minute
+        # cold-start refresh of 400+ tickers. Path falls back to None if no
+        # state_dir is configured, in which case the cache stays in-memory.
+        sentiment_cache_path: Optional[Path] = None
+        state_dir_str = market_config.get("state_dir")
+        if state_dir_str:
+            from .paper_trader import PROJECT_ROOT
+            state_dir_path = Path(state_dir_str)
+            if not state_dir_path.is_absolute():
+                state_dir_path = PROJECT_ROOT / state_dir_path
+            sentiment_cache_path = state_dir_path / "sentiment_cache.json"
+        self.llm = LLMSentimentAnalyzer(
+            config.get("llm_sentiment", {}), cache_path=sentiment_cache_path,
+        )
         self.earnings = EarningsTracker()
         self.corporate_actions = CorporateActionsTracker()
         self.config = config

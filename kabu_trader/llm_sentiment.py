@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .news_fetcher import fetch_stock_news
@@ -67,8 +68,9 @@ Scoring guide (be conservative — most news is 0 or ±1):
 class LLMSentimentAnalyzer:
     """Analyzes stock news sentiment using OpenAI API."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, cache_path: Optional[Path] = None):
         self.enabled = config.get("enabled", False)
+        self._cache_path: Optional[Path] = cache_path
         if not self.enabled:
             return
 
@@ -91,6 +93,42 @@ class LLMSentimentAnalyzer:
         except ImportError:
             print("Warning: openai package not installed. Run: pip install openai")
             self.enabled = False
+            return
+
+        # Load persisted cache so container restart doesn't trigger a 5-10min
+        # cold-start refresh of 400+ tickers. TTL is enforced on load so stale
+        # entries beyond 6h are dropped.
+        self._load_cache()
+
+    def _load_cache(self) -> None:
+        if not self._cache_path or not self._cache_path.exists():
+            return
+        try:
+            with open(self._cache_path) as f:
+                raw = json.load(f)
+            now = time.time()
+            self._cache = {
+                k: v for k, v in raw.items()
+                if isinstance(v, dict) and now - v.get("_timestamp", 0) < 6 * 3600
+            }
+            dropped = len(raw) - len(self._cache)
+            print(f"LLM sentiment cache loaded: {len(self._cache)} entries"
+                  + (f" ({dropped} stale dropped)" if dropped else ""))
+        except Exception as e:
+            print(f"Warning: failed to load LLM sentiment cache: {e}")
+            self._cache = {}
+
+    def _save_cache(self) -> None:
+        if not self._cache_path:
+            return
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._cache_path.with_suffix(self._cache_path.suffix + ".tmp")
+            with open(tmp, "w") as f:
+                json.dump(self._cache, f, ensure_ascii=False)
+            tmp.replace(self._cache_path)
+        except Exception as e:
+            print(f"Warning: failed to save LLM sentiment cache: {e}")
 
     def analyze_stock(
         self,
@@ -163,6 +201,7 @@ class LLMSentimentAnalyzer:
             result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.5))))
 
             self._cache[cache_key] = result
+            self._save_cache()
             return result
 
         except Exception as e:
@@ -240,6 +279,8 @@ class LLMSentimentAnalyzer:
             }
             self._cache[ticker] = result
             results[ticker] = result
+        if results:
+            self._save_cache()
         return results
 
     def analyze_multiple(
