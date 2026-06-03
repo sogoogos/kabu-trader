@@ -151,10 +151,16 @@ class IBKRBroker:
         order_type: str = "MKT", limit_price: Optional[float] = None,
         outside_rth: bool = False,
     ) -> dict:
-        """Place a buy/sell order. Returns {order_id, status, ticker, side, shares}.
+        """Place a buy/sell order. Returns a dict with the broker fill info.
 
         side: "BUY" or "SELL"
         order_type: "MKT" (market) or "LMT" (limit; requires limit_price)
+
+        Returns: {order_id, perm_id, status, ticker, side, shares,
+                  filled_shares, avg_fill_price}
+            filled_shares is 0 and avg_fill_price is 0.0 if the order hasn't
+            filled yet by the time polling times out — the caller should fall
+            back to its own price/share estimate in that case.
         """
         from ib_insync import MarketOrder, LimitOrder
         self._ensure()
@@ -175,14 +181,19 @@ class IBKRBroker:
         order.outsideRth = outside_rth
         order.tif = "DAY"
 
+        # Wait until the order reaches a terminal state. "Submitted" /
+        # "PreSubmitted" / "PendingSubmit" are NOT terminal — the order is
+        # live at the broker but hasn't filled — so the previous loop's early
+        # break on those statuses left the local ledger writing signal-time
+        # prices even though the broker hadn't actually filled yet. MKT
+        # orders on liquid JP/US names normally fill within a second; budget
+        # 10s before giving up and returning whatever we have.
         with self._lock:
             trade = self._ib.placeOrder(contract, order)
-            for _ in range(10):
+            terminal = {"Filled", "Cancelled", "ApiCancelled", "Inactive"}
+            for _ in range(33):  # 33 × 0.3 ≈ 10s
                 self._ib.sleep(0.3)
-                if trade.orderStatus.status in (
-                    "Submitted", "PreSubmitted", "Filled", "Cancelled",
-                    "ApiCancelled", "Inactive",
-                ):
+                if trade.orderStatus.status in terminal:
                     break
         return {
             "order_id": trade.order.orderId,
@@ -191,6 +202,8 @@ class IBKRBroker:
             "ticker": ticker,
             "side": action,
             "shares": shares,
+            "filled_shares": int(trade.orderStatus.filled or 0),
+            "avg_fill_price": float(trade.orderStatus.avgFillPrice or 0),
         }
 
     def cancel_order(self, order_id: int) -> bool:
