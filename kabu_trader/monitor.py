@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -81,6 +81,7 @@ class Monitor:
         self._last_sentiment_time: float = 0  # timestamp of last sentiment refresh
         self._last_earnings_time: float = 0  # timestamp of last earnings refresh
         self._last_summary_date: str = ""  # YYYY-MM-DD of last daily summary sent
+        self._last_sunday_reminder_date: str = ""  # YYYY-MM-DD of last Sunday reminder sent
         self._last_actions_check: float = 0  # timestamp of last corporate-actions check
         self._last_retrain_week: int = -1  # ISO week number of last retrain
         self._seen_headlines: set = set()  # track seen news headlines
@@ -154,15 +155,20 @@ class Monitor:
     def _check_broker_health(self) -> None:
         """Watchdog: alert via LINE if the IBKR Gateway is offline during trading hours.
 
-        Silent outside trading hours so the nightly forced-logout cycle doesn't spam.
-        Sends one alert after `alert_after_seconds` of continuous downtime, then
-        repeats every `alert_repeat_seconds` so the user can't miss it. Emits a
-        recovery alert when the broker comes back.
+        Active during the watchdog window (30 min before open through close,
+        weekdays only). The pre-open margin gives the operator time to restart
+        Gateway and approve IB Key 2FA before market open instead of losing
+        the first 10-20 minutes to a missed nightly cycle. Silent outside the
+        window so weekend nightly logouts don't spam.
+
+        Sends one alert after `alert_after_seconds` of continuous downtime,
+        then repeats every `alert_repeat_seconds`. Emits a recovery alert when
+        the broker comes back.
         """
         broker = getattr(self.paper_trader, "live_broker", None) if self.paper_trader else None
         if broker is None or not hasattr(broker, "is_healthy"):
             return
-        if not self._is_trading_hours():
+        if not self._is_watchdog_window():
             return
 
         broker_cfg = self.config.get("broker", {})
@@ -226,6 +232,23 @@ class Monitor:
             return False
 
         return start <= now <= end
+
+    def _is_watchdog_window(self) -> bool:
+        """True during the broker watchdog window: 30 min before trading start
+        through the end of trading. This widens beyond _is_trading_hours so a
+        missed nightly 2FA gets alerted *before* the open instead of 5-10 min
+        after, giving the operator time to restart Gateway and approve the
+        push without losing market open.
+        """
+        now = datetime.now(self.tz)
+        if now.weekday() >= 5:
+            return False
+        start_h, start_m = map(int, self.monitor_config["trading_hours_start"].split(":"))
+        end_h, end_m = map(int, self.monitor_config["trading_hours_end"].split(":"))
+        # 30 minutes before open
+        pre_open = now.replace(hour=start_h, minute=start_m, second=0) - timedelta(minutes=30)
+        end = now.replace(hour=end_h, minute=end_m, second=0)
+        return pre_open <= now <= end
 
     def _build_price_table(self, prices: List[dict]) -> Table:
         table = Table(title="Stock Prices", show_header=True, header_style="bold cyan")
@@ -455,6 +478,53 @@ class Monitor:
             self._last_summary_date = today
             self.console.print(
                 f"[bold cyan]Daily summary sent for {self.market_name}[/bold cyan]"
+            )
+
+    def _send_sunday_reminder(self):
+        """Sunday-evening email reminding the operator to be ready for Monday open.
+
+        The Gateway nightly cycle runs Saturday night JST; if the IB Key push
+        is missed, the watchdog stays silent through Sunday (weekend gating)
+        and the user finds out only minutes after Monday open — losing the
+        first 10-20 minutes of trading to a recovery scramble. This proactive
+        nudge gives them Sunday evening to verify Gateway state and put their
+        phone on standby for the next nightly cycle.
+
+        Only fires for containers that have a live broker wired in — paper-
+        only services don't need the reminder.
+        """
+        if not self._is_live():
+            return
+        now = datetime.now(self.tz)
+        if now.weekday() != 6:  # Sundays only
+            return
+        if now.hour < 20:  # fire from 20:00 JST onward
+            return
+        today = now.strftime("%Y-%m-%d")
+        if self._last_sunday_reminder_date == today:
+            return
+
+        subject = f"[kabu-trader {self.market_name}] Sunday reminder — verify Gateway for Monday open"
+        msg = (
+            f"⏰ Sunday Reminder [{self.market_name}]\n"
+            f"\n"
+            f"Tomorrow's market opens at {self.monitor_config['trading_hours_start']} "
+            f"{self.monitor_config['timezone']}.\n"
+            f"The IBKR Gateway nightly cycle Saturday night needs an IB Key approval; "
+            f"if it was missed, port 4001 is silent right now and the watchdog "
+            f"won't alert until 30 min before open at the earliest.\n"
+            f"\n"
+            f"Quick check:\n"
+            f"  ssh kabu-ec2 'sudo ss -tlnp | grep :4001'\n"
+            f"\n"
+            f"If empty, restart now while you have time:\n"
+            f"  ssh kabu-ec2 'docker restart ib-gateway'\n"
+            f"and approve the IB Key push within 30 seconds."
+        )
+        if self._notify(subject, msg):
+            self._last_sunday_reminder_date = today
+            self.console.print(
+                f"[bold cyan]Sunday reminder sent for {self.market_name}[/bold cyan]"
             )
 
     def _auto_retrain(self):
@@ -842,6 +912,8 @@ class Monitor:
                     self._refresh_earnings()
                     self._check_corporate_actions()
                     self._send_daily_summary()
+                    self._send_sunday_reminder()
+                    self._check_broker_health()  # active 30 min before open
                     self._auto_retrain()
                     now = datetime.now(self.tz).strftime("%H:%M:%S")
                     self.console.print(
