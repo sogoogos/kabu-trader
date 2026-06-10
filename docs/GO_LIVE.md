@@ -63,6 +63,11 @@ docker rm -f ib-gateway && docker run -d --name ib-gateway --restart unless-stop
   -e TRADING_MODE=live \
   -e READ_ONLY_API=no \
   -e EXISTING_SESSION_DETECTED_ACTION=primary \
+  -e AUTO_RESTART_TIME="11:55 PM" \
+  -e RELOGIN_AFTER_TWOFA_TIMEOUT=yes \
+  -e TWOFA_TIMEOUT_ACTION=restart \
+  -e TWOFA_EXIT_INTERVAL=180 \
+  -e TIME_ZONE="America/New_York" \
   -e TWS_SETTINGS_PATH=/home/ibgateway/settings \
   -v ~/ibkr-data-live:/home/ibgateway/settings \
   gnzsnz/ib-gateway:stable
@@ -72,7 +77,19 @@ Changes from the paper command:
 - `TRADING_MODE=live` (was `paper`)
 - Separate bind-mount `~/ibkr-data-live` so the autorestart file is per-environment
 
-Approve 2FA on your phone (IBKR will **not** let you disable 2FA on a live account).
+2FA / re-auth automation (the bind-mount above is what makes these persist):
+- `AUTO_RESTART_TIME="11:55 PM"` (in `TIME_ZONE`) — IBC does a **soft restart** just before IBKR's nightly maintenance that **reuses the session and skips 2FA**. This replaces the nightly forced logout, so 2FA drops from every night to roughly **once a week** (IBKR still forces a full re-auth weekly).
+- `RELOGIN_AFTER_TWOFA_TIMEOUT=yes` — if the IB Key push times out (you didn't tap in time), IBC **re-initiates login and a fresh push is sent automatically** instead of sitting in a failed state.
+- `TWOFA_TIMEOUT_ACTION=restart` — backstop: if relogin doesn't recover, the Gateway restarts (with `--restart unless-stopped`) and re-attempts login.
+- `TWOFA_EXIT_INTERVAL=180` — seconds IBC waits for login to complete after you acknowledge 2FA (default 60; raised so a slow tap doesn't time out).
+
+Approve 2FA on your phone (IBKR will **not** let you disable 2FA on a live account). With the settings above a missed/timed-out push now re-fires automatically — watch for the second push and tap it.
+
+Watch the re-auth loop live with:
+
+```bash
+docker logs -f ib-gateway 2>&1 | grep -iE "second factor|relogin|Login has completed"
+```
 
 Verify login:
 
