@@ -425,26 +425,63 @@ docker run -d --name ib-gateway --restart unless-stopped --network host \
   --env-file ~/.ibkr.env -e TRADING_MODE=paper \
   -e READ_ONLY_API=yes \
   -e EXISTING_SESSION_DETECTED_ACTION=primary \
+  -e AUTO_RESTART_TIME="11:55 PM" \
+  -e RELOGIN_AFTER_TWOFA_TIMEOUT=yes \
+  -e TWOFA_TIMEOUT_ACTION=restart \
+  -e TWOFA_EXIT_INTERVAL=180 \
+  -e TIME_ZONE="America/New_York" \
+  -e TWS_SETTINGS_PATH=/home/ibgateway/settings \
+  -v ~/ibkr-data:/home/ibgateway/settings \
   gnzsnz/ib-gateway:stable
 ```
 
 `EXISTING_SESSION_DETECTED_ACTION=primary` is **important** — without it, Gateway hangs on a modal "Existing session detected" dialog after any reconnect, and every API call hangs until someone clicks the dialog manually.
 
-For stage 2 (placing orders), drop `READ_ONLY_API` (default is `yes`, so you must explicitly set it to `no`):
+The 2FA / re-auth block (`AUTO_RESTART_TIME`, `RELOGIN_AFTER_TWOFA_TIMEOUT`, `TWOFA_TIMEOUT_ACTION`, `TWOFA_EXIT_INTERVAL`) plus the persisted `~/ibkr-data` bind-mount is what stops 2FA from being a nightly chore — see [2FA / re-auth automation](#2fa--re-auth-automation) below.
+
+For stage 2 (placing orders), drop `READ_ONLY_API` (default is `yes`, so you must explicitly set it to `no`) — keep the rest of the env block:
 
 ```bash
 docker run -d --name ib-gateway --restart unless-stopped --network host \
   --env-file ~/.ibkr.env -e TRADING_MODE=paper \
   -e READ_ONLY_API=no \
   -e EXISTING_SESSION_DETECTED_ACTION=primary \
+  -e AUTO_RESTART_TIME="11:55 PM" \
+  -e RELOGIN_AFTER_TWOFA_TIMEOUT=yes \
+  -e TWOFA_TIMEOUT_ACTION=restart \
+  -e TWOFA_EXIT_INTERVAL=180 \
+  -e TIME_ZONE="America/New_York" \
+  -e TWS_SETTINGS_PATH=/home/ibgateway/settings \
+  -v ~/ibkr-data:/home/ibgateway/settings \
   gnzsnz/ib-gateway:stable
 ```
 
-**Approve 2FA on the IBKR mobile app** — Gateway needs this on every restart (paper login uses IB Key push). Watch for the push and tap "Approve". Verify login completed:
+**Approve 2FA on the IBKR mobile app** — the first login still needs a push approval (paper login uses IB Key push). Watch for the push and tap "Approve". With the re-auth block above, a *missed or timed-out* push now re-fires automatically, and the nightly restart no longer needs 2FA at all. Verify login completed:
 
 ```bash
 docker logs ib-gateway | grep "Login has completed"
 ```
+
+### 2FA / re-auth automation
+
+IBKR's IB Key push needs a human tap and **cannot be disabled** on a live account. You can't automate the tap itself — but you *can* make the Gateway stop demanding one every night, and recover on its own when a push is missed. The env vars in the launch commands above do this:
+
+| Variable | Value | What it does |
+|---|---|---|
+| `AUTO_RESTART_TIME` | `"11:55 PM"` (in `TIME_ZONE`) | IBC does a **soft restart** just before IBKR's nightly maintenance that reuses the session token — **no re-login, no 2FA**. Replaces the nightly forced logout, so 2FA drops from nightly to ~weekly (IBKR forces a true re-auth once a week). |
+| `RELOGIN_AFTER_TWOFA_TIMEOUT` | `yes` | If the push **times out** (you didn't tap in time), IBC re-initiates login and **a fresh push is sent automatically** instead of leaving the Gateway stuck logged-out. |
+| `TWOFA_TIMEOUT_ACTION` | `restart` | Backstop: if relogin doesn't recover, the process exits and `--restart unless-stopped` brings it back to retry login. |
+| `TWOFA_EXIT_INTERVAL` | `180` | Seconds IBC waits for login to finish after you acknowledge 2FA (default 60). Raised so a slow tap doesn't time out. |
+
+**The bind-mount is mandatory for this to work:** `-v ~/ibkr-data:/home/ibgateway/settings` (with `TWS_SETTINGS_PATH=/home/ibgateway/settings`). The autorestart token lives in that settings dir; without persistence a `docker rm`/recreate wipes it and you're back to nightly 2FA.
+
+Watch the re-auth loop live:
+
+```bash
+docker logs -f ib-gateway 2>&1 | grep -iE "second factor|relogin|Login has completed"
+```
+
+A timed-out push should be followed by a relogin line and a second push; tap it and you'll see `Login has completed`. The monitor's broker watchdog still emails/LINEs you (`force_email=True`) if the Gateway stays down — keep it on to catch the ~weekly forced re-auth.
 
 ### 3. Enable in config
 
@@ -498,8 +535,8 @@ Local-only positions (e.g. ones opened before the broker was wired in) are repor
 
 ### Known gotchas
 
-- **Nightly Gateway restart (~midnight ET)** invalidates the session. The IBKRBroker auto-reconnects on the next API call (throttled to one attempt per 30s), so a single missed signal is the worst case.
-- **Paper-account 2FA push** must be approved manually on the phone every container restart. The image does not write an autorestart file.
+- **Nightly Gateway restart (~midnight ET)** invalidates the session. The IBKRBroker auto-reconnects on the next API call (throttled to one attempt per 30s), so a single missed signal is the worst case. With `AUTO_RESTART_TIME` set (see [2FA / re-auth automation](#2fa--re-auth-automation)), the nightly cycle becomes a soft restart that keeps the session — no re-login, no 2FA.
+- **2FA push** is needed on the *first* login and on IBKR's ~weekly forced re-auth — not every night, once `AUTO_RESTART_TIME` is configured. A missed/timed-out push re-fires automatically when `RELOGIN_AFTER_TWOFA_TIMEOUT=yes`. The autorestart token only persists if the settings dir is bind-mounted (`-v ~/ibkr-data:/home/ibgateway/settings`).
 - **Fill price** in PaperTrader is the signal price, not the actual broker fill. Volatile names can show cents of drift. Reading back `trade.fills` to override `entry_price` is on the to-do list.
 - **`docker rm` wipes filesystem edits** inside the Gateway container (jts.ini, IBC config). For persistent custom config, use `CUSTOM_CONFIG=yes` and bind-mount the config files.
 
