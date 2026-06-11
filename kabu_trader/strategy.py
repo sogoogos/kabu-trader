@@ -131,6 +131,11 @@ class SwingCompositeStrategy:
             strong_threshold = self.params.get("strong_signal_threshold", 7)
             if abs(score) >= threshold:
                 if score > 0:
+                    # Suppress longs that fight the ML model or chase
+                    # overbought extension (exits are never vetoed).
+                    vetoed, _ = self._buy_vetoed(df, i)
+                    if vetoed:
+                        continue
                     sig = Signal.STRONG_BUY if score >= strong_threshold else Signal.BUY
                 else:
                     sig = Signal.STRONG_SELL if score <= -strong_threshold else Signal.SELL
@@ -165,6 +170,16 @@ class SwingCompositeStrategy:
         else:
             sig = Signal.HOLD
 
+        # Block new longs that fight the ML model or chase overbought
+        # extension. Exits (SELL/STRONG_SELL) are never vetoed. Downgrade to
+        # HOLD so the monitor takes no action; the veto reason is recorded for
+        # the log even though HOLD signals aren't alerted.
+        if sig in (Signal.BUY, Signal.STRONG_BUY):
+            vetoed, veto_reason = self._buy_vetoed(df, len(df) - 1)
+            if vetoed:
+                sig = Signal.HOLD
+                reasons = reasons + [veto_reason]
+
         return TradeSignal(
             ticker=ticker,
             signal=sig,
@@ -173,6 +188,48 @@ class SwingCompositeStrategy:
             reasons=reasons,
             timestamp=df.index[-1],
         )
+
+    def _buy_vetoed(self, df: pd.DataFrame, i: int) -> Tuple[bool, str]:
+        """Block new long entries that fight the ML model or chase overbought
+        extension. Applies to BUY signals only — never blocks exits.
+
+        Two gates, both seen bleeding money in live JP trading where trend /
+        relative-strength scorers outvoted them:
+
+        1. ML veto — don't buy when the ML model (the highest-weighted scorer)
+           is actively bearish. `buy_veto_ml_proba_below` defaults to 0.45,
+           the same boundary `_score_ml` uses to call a prediction bearish, so
+           this fires exactly when ML is contributing a negative score that the
+           composite is overriding. Skipped when no model is loaded (proba NaN).
+
+        2. Overbought veto — don't buy stretched names. RSI above the
+           configured overbought level, or price above the upper Bollinger
+           Band, marks a reversal-risk entry the composite already scores as
+           bearish but can outvote. Toggle with `buy_veto_overbought`.
+
+        Returns (vetoed, reason).
+        """
+        reasons = []
+
+        ml_floor = self.params.get("buy_veto_ml_proba_below", 0.45)
+        if ml_floor and "ML_proba" in df.columns:
+            proba = df["ML_proba"].iloc[i]
+            if not pd.isna(proba) and proba < ml_floor:
+                reasons.append(f"ML bearish ({proba:.0%} < {ml_floor:.0%})")
+
+        if self.params.get("buy_veto_overbought", True):
+            rsi_val = df["RSI"].iloc[i]
+            overbought = self.params.get("rsi_overbought", 70)
+            if not pd.isna(rsi_val) and rsi_val > overbought:
+                reasons.append(f"RSI overbought ({rsi_val:.0f} > {overbought})")
+            close = df["Close"].iloc[i]
+            bb_upper = df["BB_upper"].iloc[i]
+            if not pd.isna(bb_upper) and close > bb_upper:
+                reasons.append("price above upper Bollinger Band")
+
+        if reasons:
+            return True, "BUY blocked: " + ", ".join(reasons)
+        return False, ""
 
     def _score_row(self, df: pd.DataFrame, i: int, ticker: str = "") -> Tuple[int, List[str]]:
         """Compute composite score for a single row.
