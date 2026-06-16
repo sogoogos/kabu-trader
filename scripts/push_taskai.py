@@ -71,19 +71,30 @@ def _fetch_prices_with_timeout(benchmark_ticker: str, tickers) -> dict:
     return result
 
 
+def _log(msg: str) -> None:
+    print(f"[push] {msg}", file=sys.stderr, flush=True)
+
+
 def build_payload(config: dict) -> tuple[dict, str]:
     """Return (payload, currency_symbol) for the given config."""
     market = get_market_settings(config)
     sym = market["currency_symbol"]
     state_dir = Path(market["state_dir"]) if market["state_dir"] else None
+    _log("loading paper trading state...")
     trader = PaperTrader(config["backtest"], state_dir=state_dir)
+    _log(f"state loaded: {len(trader.positions)} positions")
 
     # Live current prices for open positions (best effort, bounded by PRICE_TIMEOUT).
+    # PUSH_SKIP_PRICES=1 で価格取得を完全スキップ（取得単価で代替＝含み損益フラット）。
     price_dict: dict[str, float] = {}
-    if trader.positions:
+    if trader.positions and not os.environ.get("PUSH_SKIP_PRICES"):
+        _log(f"fetching current prices for {len(trader.positions)} tickers...")
         price_dict = _fetch_prices_with_timeout(
             market["benchmark_ticker"], list(trader.positions.keys())
         )
+        _log(f"prices: got {len(price_dict)}")
+    elif trader.positions:
+        _log("PUSH_SKIP_PRICES set; skipping price fetch")
 
     summary = trader.get_summary(price_dict)
 
@@ -143,6 +154,7 @@ def main() -> int:
         print("TASKAI_INGEST_URL / TASKAI_INGEST_TOKEN must be set", file=sys.stderr)
         return 2
 
+    _log(f"loading config {args.config}")
     config = load_config(args.config)
     payload, sym = build_payload(config)
     body = json.dumps(
@@ -155,6 +167,7 @@ def main() -> int:
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
         method="POST",
     )
+    _log(f"posting to {url} ...")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             print(f"[{args.source}] pushed: {resp.status} {resp.read().decode()[:200]}")
