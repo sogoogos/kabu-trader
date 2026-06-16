@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
 import urllib.request
 from pathlib import Path
@@ -34,6 +35,33 @@ from kabu_trader.data_fetcher import DataFetcher
 from kabu_trader.paper_trader import PaperTrader
 
 RECENT_TRADES = 15
+PRICE_TIMEOUT = 30  # 現在値取得の上限秒数（超えたら取得単価で代替し、ハングを防ぐ）
+
+
+class _PriceTimeout(Exception):
+    pass
+
+
+def _fetch_prices_with_timeout(fetcher: DataFetcher, tickers: list[str]) -> dict:
+    """現在値を取得。PRICE_TIMEOUT を超えたら諦めて空 dict を返す（cron がハングしないように）。"""
+    price_dict: dict[str, float] = {}
+
+    def _on_alarm(signum, frame):  # noqa: ANN001
+        raise _PriceTimeout()
+
+    old = signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(PRICE_TIMEOUT)
+    try:
+        for p in fetcher.fetch_current_prices(tickers):
+            price_dict[p["ticker"]] = p["price"]
+    except _PriceTimeout:
+        print(f"price fetch timed out after {PRICE_TIMEOUT}s; using entry prices", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 - price fetch is best effort
+        print(f"price fetch failed: {e}", file=sys.stderr)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+    return price_dict
 
 
 def build_payload(config: dict) -> tuple[dict, str]:
@@ -43,15 +71,11 @@ def build_payload(config: dict) -> tuple[dict, str]:
     state_dir = Path(market["state_dir"]) if market["state_dir"] else None
     trader = PaperTrader(config["backtest"], state_dir=state_dir)
 
-    # Live current prices for open positions (best effort).
+    # Live current prices for open positions (best effort, bounded by PRICE_TIMEOUT).
     price_dict: dict[str, float] = {}
     if trader.positions:
         fetcher = DataFetcher(benchmark_ticker=market["benchmark_ticker"])
-        try:
-            for p in fetcher.fetch_current_prices(list(trader.positions.keys())):
-                price_dict[p["ticker"]] = p["price"]
-        except Exception as e:  # noqa: BLE001 - price fetch is best effort
-            print(f"price fetch failed: {e}", file=sys.stderr)
+        price_dict = _fetch_prices_with_timeout(fetcher, list(trader.positions.keys()))
 
     summary = trader.get_summary(price_dict)
 
