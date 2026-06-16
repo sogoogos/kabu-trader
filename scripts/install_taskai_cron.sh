@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # TaskAI への取引状況プッシュを cron に登録する（平日30分ごと・3市場）。
 #
-# 使い方:
-#   export TASKAI_INGEST_URL=https://taskai.busystems.com/api/trading/ingest
+# 使い方（URL/トークンは環境変数から。リポジトリは公開なので値はコミットしない）:
+#   export TASKAI_INGEST_URL=https://<your-taskai-domain>/api/trading/ingest
 #   export TASKAI_INGEST_TOKEN=<TaskAI と同じトークン>
 #   bash scripts/install_taskai_cron.sh
 #
