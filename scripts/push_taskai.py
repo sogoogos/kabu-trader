@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Push the current paper/live trading status to the TaskAI app.
+"""Push the current paper/live trading status to a TaskAI deployment.
 
-TaskAI (https://taskai.busystems.com) shows the swing-trading status in its
-"投資" tab. This script builds the same summary `report` shows, then POSTs it to
-TaskAI's ingest endpoint. Run it on a cron (see crontab example below) so the
-app always shows a recent snapshot.
+The companion TaskAI app shows the swing-trading status in its "投資" tab. This
+script builds the same summary `report` shows, then POSTs it to TaskAI's ingest
+endpoint. Run it on a cron so the app always shows a recent snapshot.
+
+The endpoint URL and shared token are read from environment variables (never
+hard-code them — this repo is public).
 
 Usage:
     python -m scripts.push_taskai -c config/default.json --source jp  --label "日本株(ペーパー)"
@@ -12,13 +14,12 @@ Usage:
     python -m scripts.push_taskai -c config/us.json       --source us   --label "米国株"
 
 Env:
-    TASKAI_INGEST_URL    e.g. https://taskai.busystems.com/api/trading/ingest
+    TASKAI_INGEST_URL    e.g. https://<your-taskai-domain>/api/trading/ingest
     TASKAI_INGEST_TOKEN  shared secret (matches TaskAI's TRADING_INGEST_TOKEN)
 
-Cron (push every 30 min, 7-23h JST), `crontab -e`:
-    */30 0-14 * * 1-5  cd /home/ec2-user/kabu-trader && /usr/bin/python3 -m scripts.push_taskai -c config/default.json --source jp   --label "日本株(ペーパー)" >> /tmp/taskai_push.log 2>&1
-    */30 0-14 * * 1-5  cd /home/ec2-user/kabu-trader && /usr/bin/python3 -m scripts.push_taskai -c config/live.json    --source live --label "日本株(ライブ)"  >> /tmp/taskai_push.log 2>&1
-    */30 13-23 * * 1-5 cd /home/ec2-user/kabu-trader && /usr/bin/python3 -m scripts.push_taskai -c config/us.json      --source us   --label "米国株"        >> /tmp/taskai_push.log 2>&1
+To schedule, use the helper which reads the two env vars and installs a crontab:
+    export TASKAI_INGEST_URL=... TASKAI_INGEST_TOKEN=...
+    bash scripts/install_taskai_cron.sh
 """
 from __future__ import annotations
 
