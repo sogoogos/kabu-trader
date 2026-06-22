@@ -76,6 +76,84 @@ def _log(msg: str) -> None:
     print(f"[push] {msg}", file=sys.stderr, flush=True)
 
 
+def build_strategy(config: dict, market: dict) -> dict:
+    """Summarize the BUY/SELL decision logic from config so TaskAI can explain it.
+
+    Pulls the composite-score thresholds + indicator weights from the strategy
+    config, the risk/exit rules from the backtest config, and describes the BUY
+    veto gates. Mirrors kabu_trader.strategy.SwingCompositeStrategy so the chat
+    answer stays in sync with how trades are actually decided.
+    """
+    from kabu_trader.strategy import SwingCompositeStrategy
+
+    strat = config.get("strategy", {}) or {}
+    params = strat.get("params", {}) or {}
+    bt = config.get("backtest", {}) or {}
+
+    # Merge configured weights over the engine defaults (same as the strategy does).
+    weights = dict(SwingCompositeStrategy.DEFAULT_WEIGHTS)
+    weights.update(params.get("indicator_weights", {}) or {})
+    indicators = [
+        {"key": k, "weight": w}
+        for k, w in sorted(weights.items(), key=lambda kv: kv[1], reverse=True)
+        if w
+    ]
+
+    # Surface the parameters that actually shape the per-indicator scores.
+    param_keys = (
+        "sma_short", "sma_long", "rsi_period", "rsi_oversold", "rsi_overbought",
+        "macd_fast", "macd_slow", "macd_signal", "bb_period", "bb_std",
+        "volume_spike_threshold", "ichimoku_tenkan", "ichimoku_kijun",
+        "ichimoku_senkou_b", "mfi_period", "adx_period", "rs_period",
+    )
+    out_params = {k: params[k] for k in param_keys if k in params}
+
+    # BUY veto gates (see SwingCompositeStrategy._buy_vetoed).
+    buy_vetoes = []
+    ml_floor = params.get("buy_veto_ml_proba_below", 0.45)
+    if ml_floor:
+        buy_vetoes.append(
+            f"ML モデルの上昇確率が {ml_floor:.0%} 未満（弱気）なら新規買いを見送る"
+        )
+    if params.get("buy_veto_overbought", True):
+        ob = params.get("rsi_overbought", 70)
+        buy_vetoes.append(
+            f"RSI が {ob} 超、または終値が上部ボリンジャーバンド超（買われすぎ）なら新規買いを見送る"
+        )
+
+    exit_keys = (
+        "stop_loss_pct", "take_profit_pct", "trailing_stop_enabled",
+        "trailing_stop_activate_pct", "trailing_stop_distance_pct",
+        "max_hold_days", "rotation_enabled", "rotation_max_pnl_pct",
+        "rotation_min_hold_hours", "reentry_cooldown_days",
+    )
+    exit_rules = {k: bt[k] for k in exit_keys if k in bt}
+
+    sizing = {k: bt[k] for k in ("position_size_pct", "max_positions") if k in bt}
+
+    signal_threshold = params.get("signal_threshold", 4)
+    strong_threshold = params.get("strong_signal_threshold", 7)
+
+    return {
+        "name": strat.get("name", "swing_composite"),
+        "benchmark": market.get("benchmark_name"),
+        "signal_threshold": signal_threshold,
+        "strong_signal_threshold": strong_threshold,
+        "indicators": indicators,
+        "params": out_params,
+        "buy_vetoes": buy_vetoes,
+        "exit_rules": exit_rules,
+        "position_sizing": sizing,
+        "description": (
+            f"{len(indicators)} 指標を各 -1〜+1 で採点し重み付けして合算。"
+            f"合計の絶対値が {signal_threshold} 以上で BUY/SELL、"
+            f"{strong_threshold} 以上で STRONG_BUY/SELL。"
+            "買われすぎ・ML弱気の新規買いは veto で見送る。決済は損切り/利確/"
+            "トレーリングストップ/最大保有日数で行う。"
+        ),
+    }
+
+
 def build_payload(config: dict) -> tuple[dict, str]:
     """Return (payload, currency_symbol) for the given config."""
     market = get_market_settings(config)
@@ -138,6 +216,7 @@ def build_payload(config: dict) -> tuple[dict, str]:
         "summary": summary,
         "positions": positions,
         "trades": trades,
+        "strategy": build_strategy(config, market),
     }
     return payload, sym
 
