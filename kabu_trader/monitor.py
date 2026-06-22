@@ -63,6 +63,7 @@ class Monitor:
         # restart (which is otherwise routine) doesn't trigger a 5-10 minute
         # cold-start refresh of 400+ tickers. Path falls back to None if no
         # state_dir is configured, in which case the cache stays in-memory.
+        self.state_dir_path: Optional[Path] = None
         sentiment_cache_path: Optional[Path] = None
         state_dir_str = market_config.get("state_dir")
         if state_dir_str:
@@ -70,6 +71,7 @@ class Monitor:
             state_dir_path = Path(state_dir_str)
             if not state_dir_path.is_absolute():
                 state_dir_path = PROJECT_ROOT / state_dir_path
+            self.state_dir_path = state_dir_path
             sentiment_cache_path = state_dir_path / "sentiment_cache.json"
         self.llm = LLMSentimentAnalyzer(
             config.get("llm_sentiment", {}), cache_path=sentiment_cache_path,
@@ -713,6 +715,42 @@ class Monitor:
                     "time": datetime.now(self.tz).strftime("%H:%M:%S"),
                     "notify": is_strong,
                 })
+
+        self._persist_signals()
+
+    def _persist_signals(self):
+        """Write the current watchlist signals to state_dir/signals.json.
+
+        The push_taskai cron is a separate process and can't see this monitor's
+        in-memory alerts, so we snapshot them to disk. TaskAI reads this file and
+        shows "現在どの銘柄に BUY/SELL シグナルが出ているか" in the chat / 投資タブ.
+        Best-effort: a write failure must never break the monitoring loop.
+        """
+        if not self.state_dir_path:
+            return
+        try:
+            self.state_dir_path.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "generated_at": datetime.now(self.tz).isoformat(timespec="seconds"),
+                "market": self.market_name,
+                "signals": [
+                    {
+                        "ticker": a["ticker"],
+                        "name": self.names.get(a["ticker"], ""),
+                        "signal": a["signal"],
+                        "score": a["score"],
+                        "price": a["price"],
+                        "reasons": a["reasons"],
+                    }
+                    for a in self.alerts
+                ],
+            }
+            tmp = self.state_dir_path / "signals.json.tmp"
+            final = self.state_dir_path / "signals.json"
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(final)  # atomic swap so push never reads a half-written file
+        except Exception as e:  # noqa: BLE001 - best effort
+            self.console.print(f"[dim]signals.json write failed: {e}[/dim]")
 
     def _send_line_alerts(self):
         """Send LINE messages for STRONG_BUY/STRONG_SELL signals across the watchlist.

@@ -154,6 +154,23 @@ def build_strategy(config: dict, market: dict) -> dict:
     }
 
 
+def _read_signals(state_dir: Path) -> tuple[list, str]:
+    """Read the monitor's latest watchlist signals from state_dir/signals.json.
+
+    The monitor (running separately) snapshots its in-memory alerts there each
+    cycle. Returns (signals, generated_at). Missing/corrupt file → ([], "").
+    """
+    path = state_dir / "signals.json"
+    try:
+        if not path.exists():
+            return [], ""
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data.get("signals", []) or [], data.get("generated_at", "") or ""
+    except Exception as e:  # noqa: BLE001 - best effort
+        _log(f"signals.json read failed: {e}")
+        return [], ""
+
+
 def build_payload(config: dict) -> tuple[dict, str]:
     """Return (payload, currency_symbol) for the given config."""
     market = get_market_settings(config)
@@ -211,12 +228,18 @@ def build_payload(config: dict) -> tuple[dict, str]:
     broker_cfg = config.get("broker", {})
     is_live = broker_cfg.get("enabled", False) and not broker_cfg.get("paper", True)
 
+    # Current BUY/SELL signals across the watchlist (written by the monitor).
+    signals, signals_at = _read_signals(trader.state_dir)
+    _log(f"signals: {len(signals)} (as of {signals_at or 'n/a'})")
+
     payload = {
         "is_live": is_live,
         "summary": summary,
         "positions": positions,
         "trades": trades,
         "strategy": build_strategy(config, market),
+        "signals": signals,
+        "signals_at": signals_at,
     }
     return payload, sym
 
