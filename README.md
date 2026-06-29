@@ -308,6 +308,26 @@ Or use environment variable: `export OPENAI_API_KEY="sk-..."`
 
 Every paper trade is also written to `paper_trading*/trades.csv` for spreadsheet review.
 
+### Performance Report
+
+`scripts/perf_report.py` reads the `trades.csv` ledgers and prints a per-environment
+scorecard (win rate, profit factor, expectancy, avg win/loss, by-reason breakdown).
+A `--since DATE` slice limits the stats to trades after a given date, so a strategy
+change can be judged against the trades that happened after it was deployed:
+
+```bash
+python3 scripts/perf_report.py                       # all three envs, default deploy-date slice
+python3 scripts/perf_report.py --since 2026-06-29
+python3 scripts/perf_report.py JP=paper_trading/trades.csv US=paper_trading_us/trades.csv
+```
+
+Pure standard library, so it runs with the system `python3` on the server. To capture
+a weekly snapshot automatically (Sat 02:00 UTC → `perf_reports/YYYY-MM-DD.txt`):
+
+```bash
+bash scripts/install_perf_report_cron.sh
+```
+
 ## Default Watchlists
 
 - **JP (`config/default.json`)** — JPX-Nikkei Index 400 constituents (~398
