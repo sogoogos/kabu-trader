@@ -121,6 +121,15 @@ class PaperTrader:
         self.rotation_enabled = config.get("rotation_enabled", True)
         self.rotation_max_pnl_pct = config.get("rotation_max_pnl_pct", -0.02)
         self.rotation_min_hold_hours = config.get("rotation_min_hold_hours", 24)
+        # Score-margin guard: only rotate when the incoming STRONG_BUY is clearly
+        # stronger than what it replaces. Rotation ALWAYS realizes a loss (it only
+        # fires on positions already past rotation_max_pnl_pct), so the swap must
+        # buy a meaningfully better edge to be worth locking that loss in. Without
+        # this, any STRONG_BUY churns out the worst loser regardless of whether the
+        # replacement actually beats it — observed bleeding -107k across 9 JP-paper
+        # rotations (all losers) in the June downturn. Require the new score to beat
+        # the rotated-out position's entry score by at least this many points.
+        self.rotation_min_score_margin = config.get("rotation_min_score_margin", 2)
         # Re-entry cooldown: don't re-buy the same ticker for N days after any exit.
         # Without this, a take-profit / trailing-stop exit immediately re-opens
         # the position because the composite score is still bullish.
@@ -271,11 +280,14 @@ class PaperTrader:
                     current_prices):
         """Find the worst-performing held position and swap it out for a stronger one.
 
-        Two guards prevent churn:
+        Three guards prevent churn:
         - `rotation_max_pnl_pct` — only rotate clear losers (default -2%, not just
           any red position).
         - `rotation_min_hold_hours` — don't rotate positions just opened; they
           need time to develop (default 24h).
+        - `rotation_min_score_margin` — only swap when the new STRONG_BUY beats the
+          rotated-out position's entry score by this margin (default 2 points), so
+          the realized loss buys a genuinely stronger edge.
         """
         now_dt = self._parse_timestamp(timestamp)
         worst = None
@@ -300,6 +312,14 @@ class PaperTrader:
         if not worst:
             return None
         old_ticker, old_price = worst
+        # Score-margin guard: the new signal must be clearly stronger than the
+        # position it evicts. Rotation locks in a loss, so a marginal upgrade isn't
+        # worth it — require the incoming score to beat the held position's entry
+        # score by at least rotation_min_score_margin points.
+        if self.rotation_min_score_margin > 0:
+            held_score = self.positions[old_ticker].signal_score
+            if score < held_score + self.rotation_min_score_margin:
+                return None
         self._sell(old_ticker, old_price, "rotated_out", timestamp)
         return self._buy(new_ticker, name, price, score, reasons, timestamp)
 
