@@ -712,6 +712,7 @@ class Monitor:
                     "score": signal.score,
                     "price": signal.price,
                     "reasons": signal.reasons,
+                    "atr": signal.atr,
                     "time": datetime.now(self.tz).strftime("%H:%M:%S"),
                     "notify": is_strong,
                 })
@@ -819,6 +820,7 @@ class Monitor:
                 ticker=ticker, name=name, signal=alert["signal"],
                 score=alert["score"], price=price, reasons=alert["reasons"],
                 timestamp=now_str, current_prices=price_dict,
+                atr=alert.get("atr"),
             )
 
             if action:

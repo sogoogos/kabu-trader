@@ -26,7 +26,8 @@ class Position:
     def __init__(self, ticker: str, name: str, entry_price: float, shares: int,
                  entry_date: str, signal_score: int, reasons: List[str],
                  high_water_mark: Optional[float] = None,
-                 last_adjusted_at: Optional[str] = None):
+                 last_adjusted_at: Optional[str] = None,
+                 entry_atr: Optional[float] = None):
         self.ticker = ticker
         self.name = name
         self.entry_price = entry_price
@@ -34,6 +35,11 @@ class Position:
         self.entry_date = entry_date
         self.signal_score = signal_score
         self.reasons = reasons
+        # ATR (absolute price units) at entry, frozen for the life of the
+        # position. Drives a volatility-scaled stop instead of a flat %. None
+        # for positions opened before ATR stops shipped — those fall back to
+        # the fixed stop_loss_pct (see PaperTrader._effective_stop_pct).
+        self.entry_atr = entry_atr
         # Highest price seen since entry — used for trailing stop.
         self.high_water_mark = high_water_mark if high_water_mark is not None else entry_price
         # Most recent date a corporate-action adjustment has been applied for
@@ -66,6 +72,7 @@ class Position:
             "reasons": self.reasons,
             "high_water_mark": self.high_water_mark,
             "last_adjusted_at": self.last_adjusted_at,
+            "entry_atr": self.entry_atr,
         }
 
     @classmethod
@@ -77,6 +84,7 @@ class Position:
             reasons=d.get("reasons", []),
             high_water_mark=d.get("high_water_mark"),
             last_adjusted_at=d.get("last_adjusted_at"),
+            entry_atr=d.get("entry_atr"),
         )
 
 
@@ -104,6 +112,21 @@ class PaperTrader:
         self.max_positions = config.get("max_positions", 5)
         self.stop_loss_pct = config.get("stop_loss_pct", 0.05)
         self.take_profit_pct = config.get("take_profit_pct", 0.15)
+
+        # ATR-scaled stop loss: place the stop atr_stop_multiple × (entry ATR)
+        # below entry instead of a flat stop_loss_pct. A flat 5% sits at only
+        # 0.6–1.25× ATR for our universe — inside daily noise — so swing
+        # positions were repeatedly whipsawed out and re-entered higher (9 JP
+        # stops in May–Jun, 6 recovered above entry within 10 trading days,
+        # ~¥142k of avoidable realized loss). The per-name stop is clamped to
+        # [atr_stop_min_pct, atr_stop_max_pct] so a quiet name still gets a
+        # real stop and a wild one can't risk more than the ceiling. Positions
+        # without a stored entry_atr (opened pre-feature, or ATR was NaN) fall
+        # back to the flat stop_loss_pct. take_profit / trailing stay flat.
+        self.atr_stop_enabled = config.get("atr_stop_enabled", True)
+        self.atr_stop_multiple = config.get("atr_stop_multiple", 2.0)
+        self.atr_stop_min_pct = config.get("atr_stop_min_pct", 0.04)
+        self.atr_stop_max_pct = config.get("atr_stop_max_pct", 0.10)
         self.shares_per_lot = config.get("shares_per_lot", 100)
         # Trailing stop: once a position is up trailing_stop_activate_pct from
         # entry, exit if price falls trailing_stop_distance_pct below the high.
@@ -226,6 +249,7 @@ class PaperTrader:
         reasons: List[str],
         timestamp: str,
         current_prices: Optional[Dict[str, float]] = None,
+        atr: Optional[float] = None,
     ) -> Optional[dict]:
         """Process a trading signal. Returns trade action taken, or None.
 
@@ -246,13 +270,13 @@ class PaperTrader:
         # BUY signals
         if signal in ("STRONG_BUY", "BUY") and ticker not in self.positions:
             if len(self.positions) < self.max_positions:
-                action = self._buy(ticker, name, price, score, reasons, timestamp)
+                action = self._buy(ticker, name, price, score, reasons, timestamp, atr)
             elif (self.rotation_enabled and signal == "STRONG_BUY"
                   and current_prices is not None):
                 rotated = self._try_rotate(
                     new_ticker=ticker, name=name, price=price, score=score,
                     reasons=reasons, timestamp=timestamp,
-                    current_prices=current_prices,
+                    current_prices=current_prices, atr=atr,
                 )
                 if rotated:
                     action = rotated
@@ -277,7 +301,7 @@ class PaperTrader:
         return None
 
     def _try_rotate(self, new_ticker, name, price, score, reasons, timestamp,
-                    current_prices):
+                    current_prices, atr=None):
         """Find the worst-performing held position and swap it out for a stronger one.
 
         Three guards prevent churn:
@@ -321,7 +345,21 @@ class PaperTrader:
             if score < held_score + self.rotation_min_score_margin:
                 return None
         self._sell(old_ticker, old_price, "rotated_out", timestamp)
-        return self._buy(new_ticker, name, price, score, reasons, timestamp)
+        return self._buy(new_ticker, name, price, score, reasons, timestamp, atr)
+
+    def _effective_stop_pct(self, pos: "Position") -> float:
+        """Stop-loss distance (as a positive fraction) for one position.
+
+        ATR-scaled when enabled and the position carries an entry ATR, clamped
+        to [atr_stop_min_pct, atr_stop_max_pct]; otherwise the flat
+        stop_loss_pct. Keeps old positions (no entry_atr) on their original
+        behavior so migration is seamless.
+        """
+        if (self.atr_stop_enabled and pos.entry_atr
+                and pos.entry_price > 0):
+            raw = self.atr_stop_multiple * pos.entry_atr / pos.entry_price
+            return max(self.atr_stop_min_pct, min(self.atr_stop_max_pct, raw))
+        return self.stop_loss_pct
 
     def check_stop_loss_take_profit(
         self, prices: Dict[str, float], timestamp: str
@@ -360,7 +398,8 @@ class PaperTrader:
             # safely inside split territory. Real -25% one-cycle crashes do
             # exist but are best handled by max_hold_days / rotation_out /
             # discretionary review rather than blind stop fire.
-            corp_action_floor = -self.stop_loss_pct * 100 * 5
+            stop_pct = self._effective_stop_pct(pos)
+            corp_action_floor = -stop_pct * 100 * 5
             if pnl_pct <= corp_action_floor:
                 print(
                     f"Warning: {ticker} pnl_pct={pnl_pct:.1f}% beyond plausible "
@@ -369,7 +408,7 @@ class PaperTrader:
                 )
                 continue
 
-            if pnl_pct <= -self.stop_loss_pct * 100:
+            if pnl_pct <= -stop_pct * 100:
                 tickers_to_close.append((ticker, price, "stop_loss"))
             elif pnl_pct >= self.take_profit_pct * 100:
                 tickers_to_close.append((ticker, price, "take_profit"))
@@ -401,7 +440,8 @@ class PaperTrader:
         return actions
 
     def _buy(self, ticker: str, name: str, price: float, score: int,
-             reasons: List[str], timestamp: str) -> Optional[dict]:
+             reasons: List[str], timestamp: str,
+             atr: Optional[float] = None) -> Optional[dict]:
         """Execute a virtual buy.
 
         Position size = initial_capital * position_size_pct (not remaining cash),
@@ -491,6 +531,7 @@ class PaperTrader:
             ticker=ticker, name=name, entry_price=price,
             shares=shares, entry_date=timestamp,
             signal_score=score, reasons=reasons,
+            entry_atr=atr,
         )
 
         trade = {
