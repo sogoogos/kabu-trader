@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from . import indicators
 
@@ -28,6 +28,9 @@ class TradeSignal:
     price: float
     reasons: List[str]
     timestamp: pd.Timestamp
+    # ATR at signal time, used by the trader to size a volatility-scaled stop.
+    # None when indicators couldn't produce it (too few bars).
+    atr: Optional[float] = None
 
     @property
     def is_buy(self) -> bool:
@@ -180,6 +183,12 @@ class SwingCompositeStrategy:
                 sig = Signal.HOLD
                 reasons = reasons + [veto_reason]
 
+        atr_val = None
+        if "ATR" in df.columns:
+            raw_atr = df["ATR"].iloc[-1]
+            if not pd.isna(raw_atr):
+                atr_val = float(raw_atr)
+
         return TradeSignal(
             ticker=ticker,
             signal=sig,
@@ -187,6 +196,7 @@ class SwingCompositeStrategy:
             price=df["Close"].iloc[-1],
             reasons=reasons,
             timestamp=df.index[-1],
+            atr=atr_val,
         )
 
     def _buy_vetoed(self, df: pd.DataFrame, i: int) -> Tuple[bool, str]:
