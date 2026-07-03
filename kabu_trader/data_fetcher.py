@@ -1,17 +1,21 @@
-"""Data fetcher module for stock market data using yfinance."""
+"""Data fetcher for stock market data via a pluggable provider (yfinance/IBKR).
+
+Raw OHLCV retrieval is delegated to a `MarketDataProvider` (see market_data.py);
+this class owns caching, current-price derivation, benchmark, and dead-ticker
+suppression — all provider-agnostic. Default provider is yfinance, so behavior is
+unchanged unless a provider is injected (e.g. via config `market_data_provider`).
+"""
 
 from __future__ import annotations
 
-import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-from . import rate_limit
+from .market_data import MarketDataProvider, YFinanceProvider
 
 
 class DataFetcher:
-    """Fetches historical and current stock data for any yfinance-supported market."""
+    """Fetches historical and current stock data via a swappable data provider."""
 
     # Class-level: after FAILURE_THRESHOLD consecutive empty fetches for the
     # same ticker, suppress it from future batches for the rest of the process
@@ -21,9 +25,15 @@ class DataFetcher:
     _failure_counts: Dict[str, int] = {}
     FAILURE_THRESHOLD = 3
 
-    def __init__(self, benchmark_ticker: str = "^N225"):
+    def __init__(
+        self,
+        benchmark_ticker: str = "^N225",
+        provider: Optional[MarketDataProvider] = None,
+    ):
         self._cache: Dict[str, pd.DataFrame] = {}
         self.benchmark_ticker = benchmark_ticker
+        # Default preserves prior behavior exactly (yfinance).
+        self._provider = provider or YFinanceProvider()
 
     def fetch_historical(
         self,
@@ -41,32 +51,12 @@ class DataFetcher:
         Returns:
             DataFrame with columns: Open, High, Low, Close, Volume
         """
-        if rate_limit.is_cooling_down():
+        if self._provider.is_cooling_down():
             raise RuntimeError(
-                f"yfinance rate-limit cooldown active ({rate_limit.seconds_remaining()}s remaining)"
+                f"{self._provider.name} rate-limit cooldown active "
+                f"({self._provider.cooldown_seconds()}s remaining)"
             )
-
-        end = datetime.now()
-        start = end - timedelta(days=days)
-
-        try:
-            stock = yf.Ticker(ticker)
-            df = stock.history(start=start, end=end, interval=interval)
-        except Exception as e:
-            rate_limit.detect_and_record(e)
-            raise
-
-        if df.empty:
-            raise ValueError(f"No data returned for {ticker}")
-
-        # Keep only OHLCV columns
-        df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
-        df.index = pd.to_datetime(df.index)
-
-        # Remove timezone info for consistency
-        if df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-
+        df = self._provider.fetch_historical(ticker, days=days, interval=interval)
         self._cache[ticker] = df
         return df
 
@@ -83,10 +73,11 @@ class DataFetcher:
         """
         if not tickers:
             return {}
-        if rate_limit.is_cooling_down():
+        if self._provider.is_cooling_down():
             print(
-                f"Warning: yfinance cooldown active — skipping batch fetch for "
-                f"{len(tickers)} tickers ({rate_limit.seconds_remaining()}s left)"
+                f"Warning: {self._provider.name} cooldown active — skipping batch "
+                f"fetch for {len(tickers)} tickers "
+                f"({self._provider.cooldown_seconds()}s left)"
             )
             return {}
 
@@ -94,50 +85,18 @@ class DataFetcher:
         if not live_tickers:
             return {}
 
-        end = datetime.now()
-        start = end - timedelta(days=days)
-
+        # Provider raises on batch-level failure so we don't count those as
+        # per-ticker failures (transient errors shouldn't mark tickers dead).
         try:
-            data = yf.download(
-                tickers=live_tickers,
-                start=start,
-                end=end,
-                interval=interval,
-                group_by="ticker",
-                threads=False,       # single-threaded to avoid bursting Yahoo
-                progress=False,
-                auto_adjust=True,
+            results = self._provider.fetch_multiple(
+                live_tickers, days=days, interval=interval
             )
         except Exception as e:
-            rate_limit.detect_and_record(e)
             print(f"Warning: batch fetch failed: {e}")
             return {}
 
-        results: Dict[str, pd.DataFrame] = {}
-        has_multiindex = isinstance(data.columns, pd.MultiIndex)
-        for ticker in live_tickers:
-            try:
-                if has_multiindex:
-                    # group_by='ticker' puts ticker at the outer level
-                    if ticker in data.columns.get_level_values(0):
-                        df = data[ticker]
-                    elif ticker in data.columns.get_level_values(-1):
-                        df = data.xs(ticker, axis=1, level=-1)
-                    else:
-                        continue
-                else:
-                    df = data
-                df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
-                df = df.dropna(how="all")
-                if df.empty:
-                    continue
-                df.index = pd.to_datetime(df.index)
-                if df.index.tz is not None:
-                    df.index = df.index.tz_localize(None)
-                self._cache[ticker] = df
-                results[ticker] = df
-            except Exception:
-                continue
+        for ticker, df in results.items():
+            self._cache[ticker] = df
 
         # Track per-ticker failures: ones we tried but got no data for.
         for ticker in live_tickers:
