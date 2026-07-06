@@ -1,57 +1,64 @@
-# IBKR ヘッドレス接続を OAuth 1.0a (Web API) へ移行する手順
+# Migrating IBKR headless access to OAuth 1.0a (Web API)
 
-## 背景 / なぜ必要か
+## Background / why this is needed
 
-- **2026-07-01 から IBKR Japan の取引では Passkey 認証が必須化**された。
-- Passkey は認証器（Face ID / 指紋 / FIDOキー）が「その場の端末」に必要で、EC2 上の**ヘッドレス IB Gateway では物理的に通せない**（"Use your Passkey device" → "Authentication failed"）。IB Key プッシュも Passkey が必須になった時点で提供されなくなる。
-- Passkey は Client Portal から削除不可（最後の1つは削除不可・JPでは必須）。
-- 結論：**IB Gateway の対話ログイン方式を捨て、OAuth 1.0a トークンで Web API を直接叩くヘッドレス方式へ移行**する。CP Gateway 不要・2FA 不要・完全無人。
+- **From 2026-07-01 IBKR Japan made passkey 2FA mandatory** for trading.
+- A passkey needs an authenticator (Face ID / fingerprint / FIDO key) present on
+  the machine, which a **headless IB Gateway on EC2 cannot provide**
+  ("Use your Passkey device" → "Authentication failed"). IB Key push also stops
+  being offered once passkey is required.
+- The passkey cannot be removed (last/only passkey is non-deletable; mandatory in
+  JP).
+- Conclusion: **drop IB Gateway's interactive-login model and hit the Web API
+  directly with OAuth 1.0a tokens** — no CP Gateway, no interactive login, no
+  2FA, fully unattended.
 
-### 根拠 / 一次情報（Passkey必須化）
+Related memory: `memory/project_ibkr_passkey_lockout.md`
 
-「2026年6月末（実効7/1）から IBKR Japan でパスキー必須」の裏付け：
+### Evidence for the passkey mandate
 
-1. **IBC 公式リリースノート（最も直接的）** — IbcAlpha/IBC v3.24.0：
-   > "IBKR Japan have given notice that **passkey authentication will be mandatory for all users from the end of June 2026**."
+1. **IBC release notes (most direct)** — IbcAlpha/IBC v3.24.0:
+   > "IBKR Japan have given notice that **passkey authentication will be
+   > mandatory for all users from the end of June 2026**."
    https://github.com/IbcAlpha/IBC/releases
-2. **IBKR Japan 公式** — セキュアログイン案内に「パスキー設定は2026年6月30日までに必須」：
+2. **IBKR Japan** secure-login page: passkey activation mandatory by 2026-06-30:
    https://www.interactivebrokers.co.jp/jp/general/secure-login.php
-3. **規制・業界背景** — 2025年の証券口座乗っ取り多発 → 金融庁(FSA)＋日本証券業協会(JSDA)が
-   フィッシング耐性MFAを義務化。日本各社が6〜7月に一斉必須化：
-   - 野村證券 6/27必須化: https://www.nomura.co.jp/introduc/news/2026/20260513_1.html
-   - 松井証券 6月〜順次: https://www.matsui.co.jp/news/2026/detail_0526_01.html
-   - 業界動向: https://finance.biggo.com/news/a2d5491a-f606-49eb-8f1b-d9a812140734
-4. **実測** — 6/30深夜→7/1の定例再起動で突然フルログイン(Passkey)要求。
-   Gateway が `Required PassKey is not supported` / `Use your Passkey device → Authentication failed`。
-   上記「6/30必須化」と時系列が一致。
+3. **Regulatory background** — 2025 brokerage account-takeover incidents led the
+   FSA + JSDA to mandate phishing-resistant MFA; Japanese brokers rolled out
+   mandatory passkey in June–July 2026 (e.g. Nomura 6/27, Matsui from June).
+4. **Observed** — overnight 6/30→7/1 the scheduled Gateway restart demanded a
+   full passkey login; it returned `Required PassKey is not supported` /
+   `Use your Passkey device → Authentication failed`, matching the mandate date.
 
-関連メモ: `memory/project_ibkr_passkey_lockout.md`
+## Prerequisites
 
-## 前提
+- Account must be **IBKR Pro** (not Lite).
+- First-party OAuth 1.0a is self-service for individuals (no IBKR approval).
+- ⚠️ Right after registration you will get `invalid consumer` (401). Uploaded
+  keys/params only activate during **overnight server maintenance** — expect up
+  to a day. If the signature is accepted and you get a normal JSON error, the
+  config is correct; just wait.
 
-- 口座は **IBKR Pro**（Lite では不可）。
-- OAuth 1.0a の First Party（自己利用）は**個人でも基本的に承認不要**で自己発行できる。
-- ⚠️ **登録直後は "invalid consumer" (401) が返る**。有効化に**最大24時間**、週末サーバ再起動後に有効化されるとの報告あり。署名が通って正規の JSON エラーが返るなら設定は正しく、あとは待つだけ。
+## 1. Self-service OAuth registration (browser, one-time)
 
-## 1. OAuth 自己発行（ブラウザ・一回きり）
-
-Client Portal の通常メニュー/検索には出てこない。**専用URL**から入る：
+Not reachable from the normal Client Portal menu/search. Use the dedicated URL:
 
 ```
 https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US
 ```
 
-1. 口座でログイン
-2. **Consumer key** を自分で決める（9文字英数字）。本番で使用中の値: `KABUTRADE`
-3. 公開鍵3点をアップロード（生成は下記2で）:
+1. Log in with the account.
+2. Choose a **consumer key** (9 alphanumeric chars). In use: `KABUTRADE`.
+3. Upload the three public artifacts (generated in step 2):
    - Signature public key ← `public_signature.pem`
    - Encryption public key ← `public_encryption.pem`
    - DH param ← `dhparam.pem`
-4. **Access Token** と **Access Token Secret** を生成 → 控える（**再取得不可**）
+4. Generate the **Access Token** and **Access Token Secret** → record them
+   (**non-recoverable**).
 
-## 2. 鍵生成（EC2 上で。秘密鍵は EC2 から出さない）
+## 2. Key generation (on EC2; private keys never leave the box)
 
-保存先: `/home/ec2-user/ibkr-oauth/`（`chmod 700`）
+Location: `/home/ec2-user/ibkr-oauth/` (`chmod 700`)
 
 ```
 mkdir -p ~/ibkr-oauth && chmod 700 ~/ibkr-oauth && cd ~/ibkr-oauth
@@ -64,40 +71,43 @@ openssl dhparam -out dhparam.pem 2048
 chmod 600 private_*.pem
 ```
 
-`public_*.pem` と `dhparam.pem` をポータルにアップロード。秘密鍵(`private_*.pem`)は EC2 内のみ。
+Upload `public_*.pem` and `dhparam.pem` to the portal. Private keys stay on EC2.
+**Use exactly this `dhparam.pem`** — do not generate a separate one via the
+command shown on the portal page (mismatch causes LST validation to fail).
 
-## 3. 資格情報の保存（EC2, 600 権限）
+## 3. Store credentials (on EC2, 600-perm)
 
-`~/ibkr-oauth/oauth.env`（**Git管理外・チャット/ログに残さない**）:
+`~/ibkr-oauth/oauth.env` (**git-ignored; never paste into chat/logs**):
 
 ```
 IBIND_USE_OAUTH=True
 IBIND_OAUTH1A_CONSUMER_KEY=KABUTRADE
-IBIND_OAUTH1A_ACCESS_TOKEN=<portalで生成>
-IBIND_OAUTH1A_ACCESS_TOKEN_SECRET=<portalで生成>
+IBIND_OAUTH1A_ACCESS_TOKEN=<from portal>
+IBIND_OAUTH1A_ACCESS_TOKEN_SECRET=<from portal>
 IBIND_OAUTH1A_SIGNATURE_KEY_FP=/home/ec2-user/ibkr-oauth/private_signature.pem
 IBIND_OAUTH1A_ENCRYPTION_KEY_FP=/home/ec2-user/ibkr-oauth/private_encryption.pem
-IBIND_OAUTH1A_DH_PRIME=<下記で抽出>
+IBIND_OAUTH1A_DH_PRIME=<extracted below>
 ```
 
-DH prime (P) の hex 抽出（cryptography では弾かれるので openssl で）:
+Extract the DH prime (p) as hex — use openssl, not `cryptography` (which rejects
+the params):
 
 ```
 openssl asn1parse -in ~/ibkr-oauth/dhparam.pem | grep -m1 INTEGER | sed 's/.*://' | tr 'A-Z' 'a-z'
 ```
 
-出力512桁(2048bit)を `IBIND_OAUTH1A_DH_PRIME` に設定。
+The 512-hex (2048-bit) output goes into `IBIND_OAUTH1A_DH_PRIME`.
 
-## 4. 依存パッケージ
+## 4. Dependencies
 
 ```
 python3 -m venv ~/ibkr-oauth/venv
 ~/ibkr-oauth/venv/bin/pip install ibind cryptography requests pycryptodome
 ```
 
-`pycryptodome`（`Crypto` モジュール）は ibind の OAuth1a に必須。
+`pycryptodome` (the `Crypto` module) is required by ibind's OAuth1a code.
 
-## 5. 接続テスト
+## 5. Connection test
 
 ```
 cd ~/ibkr-oauth
@@ -105,67 +115,113 @@ set -a; . ./oauth.env; set +a
 ./venv/bin/python -c "from ibind import IbkrClient; c=IbkrClient(use_oauth=True); print(c.tickle().data)"
 ```
 
-- `invalid consumer` (401) → **未有効化。待って再試行**。
-- 認証情報が返る → 有効化済み。次へ。
+- `invalid consumer` (401) → **not activated yet; wait and retry**.
+- Auth data returned → activated. Proceed.
 
-## 6. アプリ側（今後の実装）
+## 6. Application side
 
-- 新アダプタ `kabu_trader/brokers/ibkr_webapi.py` を `ibind.IbkrClient` ベースで作成し、
-  既存 `IBKRBroker`（`ibkr.py`）と**同じI/Fのドロップイン**にする。
-  対応メソッド: `place_order` / `cancel_order` / `get_positions` / `get_orders` /
-  `get_quote` / `get_account_summary` / `is_healthy`。
-- ibind マッピング: `stock_conid_by_symbol`(conid解決) / `place_order`+`reply`(確認応答) /
-  `cancel_order` / `positions` / `live_orders` / `live_marketdata_snapshot` /
-  `portfolio_summary` / `check_auth_status`。セッション維持は `start_tickler(60)`。
-- コンテナから使う場合: `~/ibkr-oauth` を read-only マウントし、`oauth.env` を env_file 指定。
-- ⚠️ Client Portal → Settings → Trading Platform の **Read-Only Access を Disabled** にしないと
-  API 発注がブロックされる（現状 Enabled）。
+- `kabu_trader/brokers/ibkr_webapi.py` provides `IBKRWebAPIBroker`, a drop-in
+  replacement for `IBKRBroker` (`ibkr.py`) built on `ibind.IbkrClient`. Same
+  interface: `connect` / `disconnect` / `is_healthy` / `place_order` /
+  `cancel_order` / `get_positions` / `get_orders` / `get_quote` /
+  `get_account_summary`.
+- ibind mapping: `stock_conid_by_symbol` (conid) / `place_order` + `reply`
+  (confirmations) / `cancel_order` / `positions` / `live_orders` /
+  `live_marketdata_snapshot` / `portfolio_summary` / `check_auth_status`. Session
+  kept alive with `start_tickler(60)`.
+- To use from a container: mount `~/ibkr-oauth` read-only and pass `oauth.env`
+  as an env_file.
+- ⚠️ Set Client Portal → Settings → Trading Platform → **Read-Only Access =
+  Disabled** or API orders are blocked (change takes effect after overnight
+  maintenance).
 
-## 7. 旧構成の撤去（移行完了後）
+## 7. Retiring the old stack (after cutover)
 
-- `ib-gateway` コンテナ（gnzsnz/ib-gateway）は不要になるので停止・削除。
-- `docker-compose` / env の TWS_* 設定と Gateway 依存を除去。
+- The `ib-gateway` container (gnzsnz/ib-gateway) is no longer needed — stop and
+  remove it.
+- Remove the `TWS_*` settings and Gateway dependencies from `docker-compose` /
+  env.
 
-## 学び / 実戦トラブルシュート（2026-07 実際に踏んだ順）
+## Lessons learned / battle-tested troubleshooting (2026-07, in the order hit)
 
-このセットアップは丸5日かかった。要点＝**「ポータルの変更はIBKRの一晩メンテでしか反映されない」**。焦って何度も鍵を変えると反映がリセットされ、いつまでも収束しない。**1つ変えたら一晩待つ**。
+This migration took a full 5 days. The core lesson: **portal changes only take
+effect during IBKR's overnight maintenance.** Changing keys repeatedly resets the
+propagation clock and never converges. **Change one thing, then wait a night.**
 
-### 反映（超重要）
-- consumer key・公開鍵・dhparam・Read-Only等**あらゆるポータル変更は即時反映されない**。**夜間メンテ後（最低1日）**に有効化される。変更後は**触らず待つ**。
+### Propagation (most important)
+- Consumer key, public keys, dhparam, Read-Only, etc. **do not apply
+  immediately** — they activate after **overnight maintenance (≥1 day)**. After a
+  change, **leave it alone and wait**.
 
-### ユーザー名 / 口座
-- OAuth自己発行ページは、ライブ `sogoogos123` でログインしても（**シークレットウィンドウでも**）右上が **`ypzdkx114`** になる。これはこの口座のOAuth用ユーザーで、**実際にはライブ口座 `U25706175`（JPY, IB-JP）に接続される**。paper用の別登録は不要だった（`portfolio_accounts` で口座IDを見て確定するのが速い）。
+### Username / account
+- The OAuth registration page shows username **`ypzdkx114`** even when you log in
+  as the live user `sogoogos123` (**even in an incognito window**). It
+  nonetheless authenticates to the **LIVE account `U25706175`** (JPY, IB-JP) — no
+  separate paper registration is needed. Confirm the account via
+  `portfolio_accounts()`.
 
-### エラーの意味（この順で進む）
-1. `401 invalid consumer` → consumer未有効化。**一晩待つ**（トークン再生成では直らなかった）。
-2. `401 LST failed, Invalid signature`（`/oauth/live_session_token`）→ **公開署名キーの不一致**（ポータルの公開署名キー ≠ EC2の秘密署名キー）、または署名キー変更の反映待ち。
-3. `RuntimeError: Live session token validation failed`（`/logout` が Invalid signature）→ **DH primeの不一致**。ポータルの dhparam が別物（画面のopensslコマンドで別生成した`dhparams.pem`をアップしていた）。**EC2の`dhparam.pem`を再アップ→一晩待つ**で解決。
+### Error progression (this is the order you hit)
+1. `401 invalid consumer` → consumer not activated yet. **Wait overnight**
+   (regenerating the token did not help).
+2. `401 LST failed, Invalid signature` (on `/oauth/live_session_token`) →
+   **signature key mismatch** (portal public signature key ≠ EC2 private
+   signature key), or the signature-key change hasn't propagated yet.
+3. `RuntimeError: Live session token validation failed` (with `/logout` returning
+   Invalid signature) → **DH prime mismatch**: the portal's dhparam was a
+   different file (a `dhparams.pem` generated via the on-page openssl command).
+   Fix: re-upload EC2's `dhparam.pem`, then **wait overnight**.
 
-### 切り分けの決め手
-- **Secret復号テスト**：`calculate_live_session_token_prepend(secret, private_encryption_key)` が成功する＝暗号化キー側は正しい。→ 残るは署名キー or DH。
-- **RSA署名が受理される（LST要求が応答を返す）＝IBKRが同じprepend(=復号Secret)で base string を再構築できている＝Secretは正しい**。それでも `validation failed` なら**残るはDH共有鍵＝prime不一致**、と論理的に確定できる。
+### Isolation technique
+- **Secret decryption test**: if
+  `calculate_live_session_token_prepend(secret, private_encryption_key)`
+  succeeds, the encryption side is correct → the problem is the signature key or
+  DH.
+- **If the RSA signature is accepted (the LST request returns a response), IBKR
+  rebuilt the same base string using the same prepend (= decrypted secret), so
+  the secret is correct.** If it still fails validation, the only remaining
+  difference is the DH shared secret → **prime mismatch**, provable by
+  elimination.
 
-### 鍵・パラメータの扱い
-- アクセストークンは固定。**再生成で変わるのは Secret のみ**。
-- DH prime は `openssl asn1parse` で抽出（`cryptography` は `Invalid DH parameters` で弾く）。**先頭ゼロは除去**（2048bitで先頭が非ゼロなら気にしなくてよい）。generator=2（ibind既定と一致）。
-- 鍵ペア整合の自己確認：`diff <(openssl rsa -in private_X.pem -pubout) public_X.pem`。
-- ⚠️ **署名/暗号スロットの取り違え**に注意（取り違えると Invalid signature）。
+### Keys / parameters
+- The access token is fixed. **Regenerating only changes the secret.**
+- Extract the DH prime with `openssl asn1parse` (`cryptography` rejects the
+  params with `Invalid DH parameters`). **Strip leading zeros** (a 2048-bit prime
+  starting non-zero needs none). Generator = 2 (matches ibind's default).
+- Self-check a key pair: `diff <(openssl rsa -in private_X.pem -pubout) public_X.pem`.
+- ⚠️ Watch for **swapped signature/encryption slots** (a swap also yields Invalid
+  signature).
 
-### セッション確立（アダプタ実装の要）
-- OAuth接続直後は `authentication_status().established == False` で `/iserver/accounts` が空。この間、発注/whatifは `accountId is not valid: U25706175` で弾かれる。→ **`initialize_brokerage_session()` を established=True になるまでリトライ**し、その後 `receive_brokerage_accounts()` で priming。Read-Only解除が原因ではなかった（が実発注には解除必須）。
+### Session establishment (adapter requirement)
+- Right after connecting, `authentication_status().established == False` and
+  `/iserver/accounts` is empty. During this window, orders/whatif are rejected
+  with `accountId is not valid: U25706175`. → **retry
+  `initialize_brokerage_session()` until established=True**, then prime with
+  `receive_brokerage_accounts()`. Disabling Read-Only Access was NOT the fix for
+  this (but is still required to place real orders).
 
-### conid 解決（日本株の罠）
-- `/trsrv/stocks`(`stock_conid_by_symbol`) は数字ティッカーが **日(TSE)/台(TWSE)/香(SEHK)で重複**。既定 `isUS=True` フィルタで**日本株が0件**になる。
-- 正解：`default_filtering=False` ＋ **JP=`contract_conditions={"exchange":"TSEJ"}` / US=`{"isUS":True}`**。（`currency` フィルタはこのendpointに項目が無く0件になる。）検証：2371.T→44060588, 2802.T→13905336, AAPL→265598。
+### conid resolution (Japanese-stock trap)
+- `/trsrv/stocks` (`stock_conid_by_symbol`) returns instruments for the same
+  numeric ticker across **TSE (Japan) / TWSE (Taiwan) / SEHK (Hong Kong)**. The
+  default `isUS=True` filter drops all JP listings (0 results).
+- Correct: `default_filtering=False` + **JP =
+  `contract_conditions={"exchange": "TSEJ"}` / US = `{"isUS": True}`**. (A
+  `currency` filter returns 0 — that field isn't present on this endpoint.)
+  Verified: 2371.T→44060588, 2802.T→13905336, AAPL→265598.
 
-### 市場データ
-- `live_marketdata_snapshot` は `/iserver/accounts` priming＋確立済みセッションが必要（未了だと `Please query /accounts first` の500）。TSEはリアルタイム購読も要る。→ 当面**価格はyfinance継続**（`market_data.py` の切替プロバイダ）。
+### Market data
+- `live_marketdata_snapshot` needs `/iserver/accounts` priming + an established
+  session (otherwise 500 `Please query /accounts first`), plus a TSE real-time
+  data subscription. → For now **prices stay on yfinance** (the switchable
+  provider in `market_data.py`).
 
-### その他
-- `No module named 'Crypto'` → `pip install pycryptodome`。
-- 実発注には Client Portal → Trading Platform → **Read-Only Access = Disabled**（反映は一晩）。
+### Misc
+- `No module named 'Crypto'` → `pip install pycryptodome`.
+- Real orders require Client Portal → Trading Platform → **Read-Only Access =
+  Disabled** (applies after overnight maintenance).
 
-### 検証ステータス（2026-07-06 時点）
-✅ OAuth接続 / サマリ / 建玉 / 注文一覧 / conid解決 / whatif発注プレビュー（ライブ実クラス、実発注なし）
-🔸 `place_order`（実発注）・`get_quote`（市場データ購読）は未検証
-⏳ 本体配線 → live復帰 → 旧 ib-gateway 撤去
+### Validation status (as of 2026-07-06)
+- ✅ OAuth connect / account summary / positions / open orders / conid
+  resolution / whatif order preview (live class, no real orders placed)
+- 🔸 `place_order` (real order) and `get_quote` (market-data subscription) not
+  yet validated
+- ⏳ Wire the app to the adapter → resume live → retire the `ib-gateway` container
