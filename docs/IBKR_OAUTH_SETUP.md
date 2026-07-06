@@ -126,9 +126,46 @@ set -a; . ./oauth.env; set +a
 - `ib-gateway` コンテナ（gnzsnz/ib-gateway）は不要になるので停止・削除。
 - `docker-compose` / env の TWS_* 設定と Gateway 依存を除去。
 
-## トラブルシュート
+## 学び / 実戦トラブルシュート（2026-07 実際に踏んだ順）
 
-- `invalid consumer` → 未有効化 or consumer key 不一致。まず24h待つ。
+このセットアップは丸5日かかった。要点＝**「ポータルの変更はIBKRの一晩メンテでしか反映されない」**。焦って何度も鍵を変えると反映がリセットされ、いつまでも収束しない。**1つ変えたら一晩待つ**。
+
+### 反映（超重要）
+- consumer key・公開鍵・dhparam・Read-Only等**あらゆるポータル変更は即時反映されない**。**夜間メンテ後（最低1日）**に有効化される。変更後は**触らず待つ**。
+
+### ユーザー名 / 口座
+- OAuth自己発行ページは、ライブ `sogoogos123` でログインしても（**シークレットウィンドウでも**）右上が **`ypzdkx114`** になる。これはこの口座のOAuth用ユーザーで、**実際にはライブ口座 `U25706175`（JPY, IB-JP）に接続される**。paper用の別登録は不要だった（`portfolio_accounts` で口座IDを見て確定するのが速い）。
+
+### エラーの意味（この順で進む）
+1. `401 invalid consumer` → consumer未有効化。**一晩待つ**（トークン再生成では直らなかった）。
+2. `401 LST failed, Invalid signature`（`/oauth/live_session_token`）→ **公開署名キーの不一致**（ポータルの公開署名キー ≠ EC2の秘密署名キー）、または署名キー変更の反映待ち。
+3. `RuntimeError: Live session token validation failed`（`/logout` が Invalid signature）→ **DH primeの不一致**。ポータルの dhparam が別物（画面のopensslコマンドで別生成した`dhparams.pem`をアップしていた）。**EC2の`dhparam.pem`を再アップ→一晩待つ**で解決。
+
+### 切り分けの決め手
+- **Secret復号テスト**：`calculate_live_session_token_prepend(secret, private_encryption_key)` が成功する＝暗号化キー側は正しい。→ 残るは署名キー or DH。
+- **RSA署名が受理される（LST要求が応答を返す）＝IBKRが同じprepend(=復号Secret)で base string を再構築できている＝Secretは正しい**。それでも `validation failed` なら**残るはDH共有鍵＝prime不一致**、と論理的に確定できる。
+
+### 鍵・パラメータの扱い
+- アクセストークンは固定。**再生成で変わるのは Secret のみ**。
+- DH prime は `openssl asn1parse` で抽出（`cryptography` は `Invalid DH parameters` で弾く）。**先頭ゼロは除去**（2048bitで先頭が非ゼロなら気にしなくてよい）。generator=2（ibind既定と一致）。
+- 鍵ペア整合の自己確認：`diff <(openssl rsa -in private_X.pem -pubout) public_X.pem`。
+- ⚠️ **署名/暗号スロットの取り違え**に注意（取り違えると Invalid signature）。
+
+### セッション確立（アダプタ実装の要）
+- OAuth接続直後は `authentication_status().established == False` で `/iserver/accounts` が空。この間、発注/whatifは `accountId is not valid: U25706175` で弾かれる。→ **`initialize_brokerage_session()` を established=True になるまでリトライ**し、その後 `receive_brokerage_accounts()` で priming。Read-Only解除が原因ではなかった（が実発注には解除必須）。
+
+### conid 解決（日本株の罠）
+- `/trsrv/stocks`(`stock_conid_by_symbol`) は数字ティッカーが **日(TSE)/台(TWSE)/香(SEHK)で重複**。既定 `isUS=True` フィルタで**日本株が0件**になる。
+- 正解：`default_filtering=False` ＋ **JP=`contract_conditions={"exchange":"TSEJ"}` / US=`{"isUS":True}`**。（`currency` フィルタはこのendpointに項目が無く0件になる。）検証：2371.T→44060588, 2802.T→13905336, AAPL→265598。
+
+### 市場データ
+- `live_marketdata_snapshot` は `/iserver/accounts` priming＋確立済みセッションが必要（未了だと `Please query /accounts first` の500）。TSEはリアルタイム購読も要る。→ 当面**価格はyfinance継続**（`market_data.py` の切替プロバイダ）。
+
+### その他
 - `No module named 'Crypto'` → `pip install pycryptodome`。
-- `Invalid DH parameters`(cryptography) → 上記 openssl 方式で prime を抽出。
-- 発注が通らない → Read-Only Access が Enabled でないか確認。
+- 実発注には Client Portal → Trading Platform → **Read-Only Access = Disabled**（反映は一晩）。
+
+### 検証ステータス（2026-07-06 時点）
+✅ OAuth接続 / サマリ / 建玉 / 注文一覧 / conid解決 / whatif発注プレビュー（ライブ実クラス、実発注なし）
+🔸 `place_order`（実発注）・`get_quote`（市場データ購読）は未検証
+⏳ 本体配線 → live復帰 → 旧 ib-gateway 撤去
