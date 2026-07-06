@@ -10,4 +10,8 @@ rich>=13.0.0
 scikit-learn==1.8.0
 openai>=1.0.0
 ib_insync>=0.9.86
+# OAuth Web API broker (broker.type=webapi) — headless, no IB Gateway.
+# pycryptodome (Crypto) is required by ibind's OAuth 1.0a signing.
+ibind>=0.1.23
+pycryptodome>=3.20.0
 tzdata>=2024.1

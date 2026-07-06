@@ -175,24 +175,24 @@ def cmd_monitor(args):
         live_broker = None
         broker_cfg = config.get("broker", {})
         if broker_cfg.get("enabled", False):
-            broker_type = broker_cfg.get("type", "ibkr").lower()
-            if broker_type == "ibkr":
-                from .brokers.ibkr import IBKRBroker
-                live_broker = IBKRBroker(
-                    host=broker_cfg.get("host", "127.0.0.1"),
-                    port=broker_cfg.get("port", 4002),
+            try:
+                live_broker = _build_live_broker(
+                    broker_cfg,
                     client_id=broker_cfg.get("client_id", 1),
-                    paper=broker_cfg.get("paper", True),
                     readonly=broker_cfg.get("readonly", False),
                 )
                 mode = "PAPER" if broker_cfg.get("paper", True) else "LIVE"
-                console.print(
-                    f"[bold red]IBKR live broker ENABLED ({mode}) — "
-                    f"orders will be submitted to {broker_cfg.get('host','127.0.0.1')}:"
-                    f"{broker_cfg.get('port',4002)}[/bold red]"
+                btype = broker_cfg.get("type", "ibkr").lower()
+                dest = (
+                    "Web API (OAuth)" if btype in _WEBAPI_TYPES
+                    else f"{broker_cfg.get('host','127.0.0.1')}:{broker_cfg.get('port',4002)}"
                 )
-            else:
-                console.print(f"[red]Unknown broker.type: {broker_type}[/red]")
+                console.print(
+                    f"[bold red]IBKR live broker ENABLED ({mode}) via {dest} — "
+                    f"orders will be submitted[/bold red]"
+                )
+            except Exception as e:
+                console.print(f"[red]Failed to init broker: {e}[/red]")
 
         monitor.paper_trader = PaperTrader(
             config["backtest"], state_dir=state_dir, live_broker=live_broker,
@@ -245,14 +245,7 @@ def cmd_broker(args):
         console.print("[yellow]broker not enabled in config[/yellow]")
         return
 
-    from .brokers.ibkr import IBKRBroker
-    broker = IBKRBroker(
-        host=broker_cfg.get("host", "127.0.0.1"),
-        port=broker_cfg.get("port", 4002),
-        client_id=97,
-        paper=broker_cfg.get("paper", True),
-        readonly=True,
-    )
+    broker = _build_live_broker(broker_cfg, client_id=97, readonly=True)
     sym = market["currency_symbol"]
     mode = "PAPER" if broker_cfg.get("paper", True) else "LIVE"
     name_of = _name_lookup(config)
@@ -294,10 +287,12 @@ def cmd_broker(args):
         else:
             console.print("[dim]No working orders.[/dim]")
 
-        # Recent fills (today only, by IBKR's wall clock)
+        # Recent fills (today only, by IBKR's wall clock). Only the TWS-API
+        # adapter exposes ib_insync's fills(); skip for the Web API adapter.
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).date()
-        fills = [f for f in broker._ib.fills() if f.execution.time.date() == today]
+        ib = getattr(broker, "_ib", None)
+        fills = [f for f in ib.fills() if f.execution.time.date() == today] if ib else []
         if fills:
             ft = Table(title=f"Today's fills ({today})")
             for c in ("Time", "Ticker", "Name", "Side", "Shares", "Price"):
@@ -318,6 +313,38 @@ def cmd_broker(args):
         broker.disconnect()
 
 
+_WEBAPI_TYPES = ("webapi", "ibkr_webapi", "oauth")
+
+
+def _build_live_broker(broker_cfg, *, client_id, readonly):
+    """Construct the configured broker adapter.
+
+    broker.type "ibkr" (default) → TWS-API IBKRBroker (needs IB Gateway);
+    "webapi"/"ibkr_webapi"/"oauth" → OAuth Web API IBKRWebAPIBroker (no Gateway).
+    host/port/client_id are ignored by the Web API adapter. Raises ValueError on
+    an unknown type.
+    """
+    broker_type = broker_cfg.get("type", "ibkr").lower()
+    paper = broker_cfg.get("paper", True)
+    if broker_type in _WEBAPI_TYPES:
+        from .brokers.ibkr_webapi import IBKRWebAPIBroker
+        return IBKRWebAPIBroker(
+            account_id=broker_cfg.get("account_id"),
+            paper=paper,
+            readonly=readonly,
+        )
+    if broker_type == "ibkr":
+        from .brokers.ibkr import IBKRBroker
+        return IBKRBroker(
+            host=broker_cfg.get("host", "127.0.0.1"),
+            port=broker_cfg.get("port", 4002),
+            client_id=client_id,
+            paper=paper,
+            readonly=readonly,
+        )
+    raise ValueError(f"Unknown broker.type: {broker_type}")
+
+
 def cmd_reconcile(args):
     """Diff local PaperTrader positions against the live broker."""
     from .paper_trader import PaperTrader
@@ -334,12 +361,9 @@ def cmd_reconcile(args):
     trader = PaperTrader(config["backtest"], state_dir=state_dir)
     local = {t: p.shares for t, p in trader.positions.items()}
 
-    from .brokers.ibkr import IBKRBroker
-    broker = IBKRBroker(
-        host=broker_cfg.get("host", "127.0.0.1"),
-        port=broker_cfg.get("port", 4002),
+    broker = _build_live_broker(
+        broker_cfg,
         client_id=broker_cfg.get("reconcile_client_id", 98),
-        paper=broker_cfg.get("paper", True),
         readonly=True,
     )
     try:
