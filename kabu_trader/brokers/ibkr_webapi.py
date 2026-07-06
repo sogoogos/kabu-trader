@@ -87,9 +87,36 @@ class IBKRWebAPIBroker:
                 return
             from ibind import IbkrClient
             client = IbkrClient(use_oauth=True)
-            # LST is fetched on construction; open a brokerage session (needed
-            # for orders/positions) and keep it alive with the tickler.
-            client.initialize_brokerage_session()
+            # LST is fetched on construction, but the brokerage (iserver)
+            # session is NOT established immediately: the first
+            # initialize_brokerage_session() returns established=False and
+            # /iserver/accounts is empty; it flips to established=True within a
+            # few seconds. Trading endpoints (orders/whatif) reject the account
+            # ("accountId is not valid") until then, so retry until established.
+            established = False
+            for _ in range(10):
+                client.initialize_brokerage_session()
+                try:
+                    established = bool(
+                        client.authentication_status().data.get("established")
+                    )
+                except Exception:
+                    established = False
+                if established:
+                    break
+                time.sleep(2)
+            if not established:
+                raise ConnectionError(
+                    "IBKR brokerage session did not establish (still "
+                    "established=False after retries)"
+                )
+            # Prime /iserver/accounts — required before market-data snapshots and
+            # order endpoints, which otherwise 500 with 'Please query /accounts
+            # first'.
+            try:
+                client.receive_brokerage_accounts()
+            except Exception:
+                pass
             client.start_tickler(60)
             self._client = client
             if self.account_id is None:
@@ -152,9 +179,14 @@ class IBKRWebAPIBroker:
     def _resolve_conid(self, ticker: str) -> int:
         """Translate our ticker convention to an IBKR conid, cached.
 
-        - "7203.T" -> Japanese listing (currency JPY)
-        - "AAPL"   -> US listing (currency USD)
-        - "BRK-B"  -> US, dash preserved
+        Uses the /trsrv/stocks reference DB (ibind.stock_conid_by_symbol). That
+        endpoint returns one instrument per exchange, so a bare numeric symbol
+        like "2371" matches TSE (Japan), TWSE (Taiwan) and SEHK (Hong Kong) —
+        we must filter by exchange. IBKR's default filter is {isUS: True}, which
+        drops all JP listings, so default_filtering must be disabled.
+
+        - "2371.T" -> exchange TSEJ  (Japanese TSE listing)  -> conid 44060588
+        - "AAPL"   -> isUS True      (US listing)
         """
         if ticker in self._conid_cache:
             return self._conid_cache[ticker]
@@ -163,14 +195,14 @@ class IBKRWebAPIBroker:
         client = self._ensure()
         if ticker.endswith(".T"):
             symbol = ticker[:-2]
-            conditions = {"currency": "JPY"}  # VERIFY: filter key/exchange
+            conditions = {"exchange": "TSEJ"}
         else:
             symbol = ticker
-            conditions = {"currency": "USD"}
+            conditions = {"isUS": True}
 
         query = StockQuery(symbol, contract_conditions=conditions)
         with self._lock:
-            res = client.stock_conid_by_symbol(query)
+            res = client.stock_conid_by_symbol(query, default_filtering=False)
         data = res.data if hasattr(res, "data") else res
         # stock_conid_by_symbol returns {symbol: conid} or {symbol: [conids]}.
         conid = data.get(symbol) if isinstance(data, dict) else data
