@@ -105,7 +105,12 @@ class PaperTrader:
     """Simulates trading with virtual money. Persists state to disk."""
 
     def __init__(self, config: dict, state_dir: Optional[Path] = None,
-                 live_broker: Optional["object"] = None):
+                 live_broker: Optional["object"] = None,
+                 notify: Optional["object"] = None):
+        # notify(subject, message, force_email=...) — set by the monitor to
+        # alert (LINE + email) when a live broker order fails/rejects, so a
+        # blocked stop/exit can't go unnoticed.
+        self._notify_cb = notify
         self.initial_capital = config.get("initial_capital", 1000000)
         self.commission_rate = config.get("commission_rate", 0.001)
         self.position_size_pct = config.get("position_size_pct", 0.1)
@@ -180,6 +185,22 @@ class PaperTrader:
         self.live_broker = live_broker
 
         self._load()
+
+    def _alert_order_failure(self, action: str, ticker: str, detail: str) -> None:
+        """Alert (LINE + email) when a live broker order fails/rejects.
+
+        A blocked stop/exit or entry must not go unnoticed, so this is sent on
+        both channels (force_email=True), like the broker watchdog. No-op when
+        no notifier is wired (e.g. pure paper mode).
+        """
+        if self._notify_cb is None:
+            return
+        subject = f"[kabu-trader] Live {action} order FAILED: {ticker}"
+        message = f"⚠️ Live {action} order failed for {ticker}: {detail}"
+        try:
+            self._notify_cb(subject, message, force_email=True)
+        except Exception as e:
+            print(f"Order-failure alert could not be sent: {e}")
 
     def _state_path(self) -> Path:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -486,9 +507,12 @@ class PaperTrader:
                 )
             except Exception as e:
                 print(f"Live BUY rejected for {ticker}: {e}")
+                self._alert_order_failure("BUY", ticker, str(e))
                 return None
             if not _broker_status_ok(order_result.get("status", "")):
-                print(f"Live BUY {order_result.get('status')} for {ticker} — local state not updated")
+                status = order_result.get("status")
+                print(f"Live BUY {status} for {ticker} — local state not updated")
+                self._alert_order_failure("BUY", ticker, f"status={status}")
                 return None
             # Prefer the broker's actual fill data over the signal-time daily
             # close so the ledger reflects what really happened. Fall back to
@@ -575,9 +599,12 @@ class PaperTrader:
                     )
                 except Exception as e:
                     print(f"Live SELL rejected for {ticker}: {e}")
+                    self._alert_order_failure("SELL", ticker, str(e))
                     return None
                 if not _broker_status_ok(order_result.get("status", "")):
-                    print(f"Live SELL {order_result.get('status')} for {ticker} — local state not updated")
+                    status = order_result.get("status")
+                    print(f"Live SELL {status} for {ticker} — local state not updated")
+                    self._alert_order_failure("SELL", ticker, f"status={status}")
                     return None
                 # Use the broker's actual fill data so realized P&L matches
                 # what really executed, not the daily-close estimate.
