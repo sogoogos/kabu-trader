@@ -229,9 +229,15 @@ class IBKRWebAPIBroker:
     # --- orders ---
 
     def _answers(self):
-        """Auto-confirm all precautionary order questions (TWS-API parity)."""
-        from ibind import QuestionType
-        return {q: True for q in QuestionType}
+        """Auto-confirm every order confirmation prompt (TWS-API parity).
+
+        ibind's find_answer matches a prompt by testing whether each answer key
+        is a substring of the question, so an empty-string key matches every
+        prompt and answers it True. A QuestionType-only dict misses prompts that
+        aren't enum members (e.g. the "Market Order Confirmation" warning), which
+        then raise "No answer found" and reject the order.
+        """
+        return {"": True}
 
     def place_order(
         self, ticker: str, side: str, shares: int,
