@@ -196,6 +196,7 @@ def cmd_monitor(args):
 
         monitor.paper_trader = PaperTrader(
             config["backtest"], state_dir=state_dir, live_broker=live_broker,
+            notify=(monitor._notify if live_broker is not None else None),
         )
         monitor.line.paper_mode = True if live_broker is None else False
         summary = monitor.paper_trader.get_summary()
