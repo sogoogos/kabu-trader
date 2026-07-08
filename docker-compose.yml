@@ -27,10 +27,17 @@ services:
     restart: unless-stopped
     network_mode: host
     command: ["-c", "/app/config/live.json", "monitor", "--paper"]
+    # OAuth Web API broker (config/live.json broker.type=webapi): IBIND_* creds
+    # live in oauth.env (600-perm, git-ignored, NOT in the image), and the RSA
+    # keys are read from their absolute paths — so mount the dir read-only at the
+    # same path the env vars reference. Set IBKR_OAUTH_DIR to relocate.
+    env_file:
+      - ${IBKR_OAUTH_DIR:-/home/ec2-user/ibkr-oauth}/oauth.env
     volumes:
       - ./config:/app/config
       - ./paper_trading_live:/app/paper_trading_live
       - ./models:/app/models
+      - ${IBKR_OAUTH_DIR:-/home/ec2-user/ibkr-oauth}:${IBKR_OAUTH_DIR:-/home/ec2-user/ibkr-oauth}:ro
     environment:
       - TZ=Asia/Tokyo
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
