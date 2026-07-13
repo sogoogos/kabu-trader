@@ -361,7 +361,9 @@ class PaperTrader:
         # position it evicts. Rotation locks in a loss, so a marginal upgrade isn't
         # worth it — require the incoming score to beat the held position's entry
         # score by at least rotation_min_score_margin points.
-        if self.rotation_min_score_margin > 0:
+        # None (config null) disables the guard; guard against it to avoid a
+        # TypeError from `None > 0` when a rotation candidate exists.
+        if self.rotation_min_score_margin and self.rotation_min_score_margin > 0:
             held_score = self.positions[old_ticker].signal_score
             if score < held_score + self.rotation_min_score_margin:
                 return None
