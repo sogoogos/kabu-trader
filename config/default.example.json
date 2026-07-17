@@ -907,7 +907,13 @@
       "mfi_period": 14,
       "adx_period": 14,
       "rs_period": 20,
-      "signal_threshold": 4
+      "signal_threshold": 4,
+      "regime_filter_enabled": false,
+      "regime_us_ticker": "^GSPC",
+      "regime_us_drop_pct": -1.5,
+      "regime_vix_ticker": "^VIX",
+      "regime_vix_above": 25.0,
+      "regime_ma_period": 25
     }
   },
   "backtest": {
