@@ -206,10 +206,31 @@ class IBKRWebAPIBroker:
 
         - "2371.T" -> exchange TSEJ  (Japanese TSE listing)  -> conid 44060588
         - "AAPL"   -> isUS True      (US listing)
+
+        The reference DB has gaps (e.g. 7740.T returns no conid under the TSEJ
+        filter, or /trsrv/stocks errors), so for a ticker we already HOLD we
+        fall back to the account's positions — the broker knows the conid of
+        anything in the portfolio.
         """
         if ticker in self._conid_cache:
             return self._conid_cache[ticker]
 
+        conid = None
+        try:
+            conid = self._conid_from_reference(ticker)
+        except Exception:
+            conid = None
+        if not conid:
+            conid = self._conid_from_positions(ticker)
+        if not conid:
+            raise ValueError(f"No conid found for {ticker}")
+        conid = int(conid)
+        self._conid_cache[ticker] = conid
+        return conid
+
+    def _conid_from_reference(self, ticker: str):
+        """Resolve conid via the /trsrv/stocks reference DB. Returns None if the
+        symbol isn't found under the exchange filter."""
         from ibind import StockQuery
         client = self._ensure()
         if ticker.endswith(".T"):
@@ -226,14 +247,25 @@ class IBKRWebAPIBroker:
         # stock_conid_by_symbol returns {symbol: conid} or {symbol: [conids]}.
         conid = data.get(symbol) if isinstance(data, dict) else data
         if isinstance(conid, (list, tuple)):
-            if not conid:
-                raise ValueError(f"No conid found for {ticker}")
-            conid = conid[0]
-        if conid is None:
-            raise ValueError(f"No conid found for {ticker}")
-        conid = int(conid)
-        self._conid_cache[ticker] = conid
+            conid = conid[0] if conid else None
         return conid
+
+    def _conid_from_positions(self, ticker: str):
+        """Resolve conid from the account's current positions — reliable for
+        held tickers the reference DB misses. Returns None if not held."""
+        try:
+            client = self._ensure()
+            with self._lock:
+                res = client.positions(account_id=self.account_id)
+            data = res.data if hasattr(res, "data") else res
+            for p in (data or []):
+                if self._ticker_from_position(p) == ticker:
+                    cid = p.get("conid") or p.get("conidex")
+                    if cid:
+                        return int(str(cid).split("@")[0])
+        except Exception:
+            return None
+        return None
 
     @staticmethod
     def _ticker_from_position(pos: dict) -> str:
