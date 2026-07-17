@@ -936,6 +936,7 @@
   },
   "monitor": {
     "interval_seconds": 300,
+    "fast_stop_interval_seconds": 60,
     "trading_hours_start": "09:00",
     "trading_hours_end": "15:00",
     "timezone": "Asia/Tokyo"

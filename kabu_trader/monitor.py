@@ -808,6 +808,77 @@ class Monitor:
                     self._sent_signals.add(key)
                     self.console.print(f"[bold yellow]Strong-signal alert sent for {alert['ticker']}[/bold yellow]")
 
+    def _notify_exit_action(self, action):
+        """Print + LINE/email a stop-loss / take-profit / trailing exit."""
+        sym = self.currency_symbol
+        pnl = action["pnl"]
+        color = "green" if pnl > 0 else "red"
+        self.console.print(
+            f"[bold {color}]PAPER {action['action']}: {action['name']} ({action['ticker']}) "
+            f"@ {sym}{action['price']:,.2f} | {action['reason']} | "
+            f"P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)[/bold {color}]"
+        )
+        msg = (
+            f"📋 [{self.market_name}] Trade: {action['reason'].upper()} [{self._mode_tag}]\n"
+            f"{'🟢' if pnl > 0 else '🔴'} SELL {action['name']}\n"
+            f"💰 {sym}{action['price']:,.2f} → P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)"
+        )
+        subject = (
+            f"[kabu-trader {self.market_name}] {action['reason'].upper()} "
+            f"{action['name']} ({action['ticker']}) {action['pnl_pct']:+.1f}%"
+        )
+        self._notify(subject, msg)
+
+    def _run_fast_stop_check(self):
+        """Exit-only check run between full cycles to cut sell latency.
+
+        Fetches current prices for HELD positions only (a handful of tickers,
+        so it's cheap) and fires stop-loss / take-profit / trailing / time
+        exits through the same path as the full cycle. No signal scan and no
+        new entries — a fast drop is exited near the fast interval instead of
+        waiting for the next ~full-cycle (~6 min) sweep. Data is still whatever
+        the price provider returns (yfinance is delayed ~15-20 min for TSE), so
+        this removes the cycle-cadence lag, not the provider lag. No-op outside
+        trading hours or with no open positions.
+        """
+        if not self.paper_trader or not self.paper_trader.positions:
+            return
+        if not self._is_trading_hours():
+            return
+        # Fetch FRESH prices for held tickers. fetch_current_prices reads the
+        # cache populated by the full cycle's fetch_multiple, so it would just
+        # return stale prices here — fetch_historical does a real network call
+        # (and refreshes the cache). Only a handful of held tickers, so cheap.
+        price_dict = {}
+        for ticker in list(self.paper_trader.positions.keys()):
+            try:
+                df = self.fetcher.fetch_historical(ticker, days=5)
+            except Exception as e:
+                self.console.print(f"[yellow]Fast stop-check: {ticker} fetch failed: {e}[/yellow]")
+                continue
+            if df is not None and len(df):
+                price_dict[ticker] = float(df["Close"].iloc[-1])
+        if not price_dict:
+            return
+        now_str = datetime.now(self.tz).strftime("%Y-%m-%d %H:%M:%S")
+        for action in self.paper_trader.check_stop_loss_take_profit(price_dict, now_str):
+            self._notify_exit_action(action)
+
+    def _sleep_with_fast_stops(self, interval):
+        """Sleep `interval` seconds, running _run_fast_stop_check every
+        `fast_stop_interval_seconds` in between (if configured and shorter)."""
+        fast = self.monitor_config.get("fast_stop_interval_seconds", 0)
+        if not fast or fast >= interval:
+            time.sleep(interval)
+            return
+        remaining = interval
+        while remaining > 0:
+            chunk = min(fast, remaining)
+            time.sleep(chunk)
+            remaining -= chunk
+            if remaining > 0:
+                self._run_fast_stop_check()
+
     def _execute_paper_trades(self, prices: list):
         """Execute paper trades based on current signals and prices."""
         if not self.paper_trader:
@@ -820,25 +891,8 @@ class Monitor:
 
         # Check stop loss / take profit first
         sl_tp_actions = self.paper_trader.check_stop_loss_take_profit(price_dict, now_str)
-        sym = self.currency_symbol
         for action in sl_tp_actions:
-            pnl = action["pnl"]
-            color = "green" if pnl > 0 else "red"
-            self.console.print(
-                f"[bold {color}]PAPER {action['action']}: {action['name']} ({action['ticker']}) "
-                f"@ {sym}{action['price']:,.2f} | {action['reason']} | "
-                f"P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)[/bold {color}]"
-            )
-            msg = (
-                f"📋 [{self.market_name}] Trade: {action['reason'].upper()} [{self._mode_tag}]\n"
-                f"{'🟢' if pnl > 0 else '🔴'} SELL {action['name']}\n"
-                f"💰 {sym}{action['price']:,.2f} → P&L: {sym}{pnl:+,.2f} ({action['pnl_pct']:+.1f}%)"
-            )
-            subject = (
-                f"[kabu-trader {self.market_name}] {action['reason'].upper()} "
-                f"{action['name']} ({action['ticker']}) {action['pnl_pct']:+.1f}%"
-            )
-            self._notify(subject, msg)
+            self._notify_exit_action(action)
 
         # Process signals
         for alert in self.alerts:
@@ -992,6 +1046,6 @@ class Monitor:
                         f"[dim][{now}] Market closed. Watching for news...[/dim]"
                     )
 
-                time.sleep(interval)
+                self._sleep_with_fast_stops(interval)
         except KeyboardInterrupt:
             self.console.print("\n[bold]Monitor stopped.[/bold]")
