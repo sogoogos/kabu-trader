@@ -836,33 +836,60 @@ class Monitor:
         so it's cheap) and fires stop-loss / take-profit / trailing / time
         exits through the same path as the full cycle. No signal scan and no
         new entries — a fast drop is exited near the fast interval instead of
-        waiting for the next ~full-cycle (~6 min) sweep. Data is still whatever
-        the price provider returns (yfinance is delayed ~15-20 min for TSE), so
-        this removes the cycle-cadence lag, not the provider lag. No-op outside
+        waiting for the next ~full-cycle (~6 min) sweep. Held prices come from
+        the live broker's IBKR real-time snapshot when available (yfinance,
+        which is ~15-20 min delayed for TSE, is the fallback). No-op outside
         trading hours or with no open positions.
         """
         if not self.paper_trader or not self.paper_trader.positions:
             return
         if not self._is_trading_hours():
             return
-        # Fetch FRESH prices for held tickers. fetch_current_prices reads the
-        # cache populated by the full cycle's fetch_multiple, so it would just
-        # return stale prices here — fetch_historical does a real network call
-        # (and refreshes the cache). Only a handful of held tickers, so cheap.
         price_dict = {}
+        sources = []
         for ticker in list(self.paper_trader.positions.keys()):
-            try:
-                df = self.fetcher.fetch_historical(ticker, days=5)
-            except Exception as e:
-                self.console.print(f"[yellow]Fast stop-check: {ticker} fetch failed: {e}[/yellow]")
-                continue
-            if df is not None and len(df):
-                price_dict[ticker] = float(df["Close"].iloc[-1])
+            price, source = self._held_price(ticker)
+            if price:
+                price_dict[ticker] = price
+                sources.append(f"{ticker}={price:g}({source})")
         if not price_dict:
             return
+        self.console.print(f"[dim]Fast stop-check: {' '.join(sources)}[/dim]")
         now_str = datetime.now(self.tz).strftime("%Y-%m-%d %H:%M:%S")
         for action in self.paper_trader.check_stop_loss_take_profit(price_dict, now_str):
             self._notify_exit_action(action)
+
+    def _held_price(self, ticker: str):
+        """Current price for a held ticker, as (price, source).
+
+        Prefers the live broker's IBKR real-time snapshot (removes yfinance's
+        ~15-20 min TSE delay) for the exit path; falls back to a fresh yfinance
+        daily bar when there's no live broker or the snapshot fails/returns 0.
+        fetch_current_prices only reads the full cycle's cache, so the fallback
+        calls fetch_historical for a real network fetch. Returns (None, "") if
+        every source fails.
+        """
+        broker = getattr(self.paper_trader, "live_broker", None) if self.paper_trader else None
+        if broker is not None:
+            try:
+                q = broker.get_quote(ticker)
+                px = q.get("last") or 0
+                if not px:  # no trade tick yet — use mid, then prior close
+                    bid, ask = q.get("bid") or 0, q.get("ask") or 0
+                    px = (bid + ask) / 2 if bid and ask else (q.get("close") or 0)
+                if px:
+                    return float(px), "IBKR"
+            except Exception as e:
+                self.console.print(
+                    f"[yellow]Fast stop-check: {ticker} IBKR quote failed ({e}); using yfinance[/yellow]"
+                )
+        try:
+            df = self.fetcher.fetch_historical(ticker, days=5)
+            if df is not None and len(df):
+                return float(df["Close"].iloc[-1]), "yf"
+        except Exception as e:
+            self.console.print(f"[yellow]Fast stop-check: {ticker} fetch failed: {e}[/yellow]")
+        return None, ""
 
     def _sleep_with_fast_stops(self, interval):
         """Sleep `interval` seconds, running _run_fast_stop_check every
