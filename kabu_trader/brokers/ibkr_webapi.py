@@ -392,6 +392,9 @@ class IBKRWebAPIBroker:
     def get_quote(self, ticker: str) -> dict:
         """Snapshot quote. Returns {ticker, bid, ask, last, close}."""
         client = self._ensure()
+        # The snapshot endpoint rejects a de-established brokerage session the
+        # same way orders do, so re-establish before querying.
+        self._ensure_brokerage_session(client)
         conid = self._resolve_conid(ticker)
         fields = [_FLD_LAST, _FLD_BID, _FLD_ASK, _FLD_CLOSE]
         row = {}
