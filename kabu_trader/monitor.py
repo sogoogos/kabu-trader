@@ -683,6 +683,37 @@ class Monitor:
                         f"[bold yellow]Breaking news alert sent for {name}[/bold yellow]"
                     )
 
+    def _evaluate_market_regime(self, benchmark_df):
+        """Fetch global-market inputs and evaluate the buy-suppression regime.
+
+        No-op unless `regime_filter_enabled` is set. Fetches the US index
+        (^GSPC) and VIX (^VIX) — both update once daily on the US close, which
+        lands before the TSE session, so they lead the JP day. Fail-open: any
+        fetch error just drops that input; evaluate_regime skips absent gates.
+        """
+        params = self.strategy_params
+        if not params.get("regime_filter_enabled", False):
+            return
+        us_df = vix_df = None
+        us_ticker = params.get("regime_us_ticker", "^GSPC")
+        vix_ticker = params.get("regime_vix_ticker", "^VIX")
+        if params.get("regime_us_drop_pct") is not None and us_ticker:
+            try:
+                us_df = self.fetcher.fetch_historical(us_ticker, days=30)
+            except Exception as e:
+                self.console.print(f"[yellow]Regime: {us_ticker} fetch failed: {e}[/yellow]")
+        if params.get("regime_vix_above") is not None and vix_ticker:
+            try:
+                vix_df = self.fetcher.fetch_historical(vix_ticker, days=30)
+            except Exception as e:
+                self.console.print(f"[yellow]Regime: {vix_ticker} fetch failed: {e}[/yellow]")
+        risk_off = self.strategy.evaluate_regime(benchmark_df, us_df, vix_df)
+        if risk_off:
+            self.console.print(
+                f"[bold yellow]Market regime RISK-OFF — new buys suppressed "
+                f"({self.strategy.regime_reason})[/bold yellow]"
+            )
+
     def _analyze_signals(self):
         """Fetch recent data and analyze signals for all watchlist stocks."""
         self.alerts = []
@@ -698,6 +729,7 @@ class Monitor:
         # 78-bar window plus weekends and holidays.
         benchmark_df = self.fetcher.fetch_benchmark(days=180)
         self.strategy.set_benchmark_data(benchmark_df)
+        self._evaluate_market_regime(benchmark_df)
         data = self.fetcher.fetch_multiple(self.watchlist, days=180, interval="1d")
 
         for ticker, df in data.items():

@@ -92,6 +92,14 @@ class SwingCompositeStrategy:
         self.sentiment_data: dict = {}  # ticker -> sentiment result
         self.earnings_data: dict = {}  # ticker -> earnings-gap dict
 
+        # Market-regime overlay: when the broad market is risk-off (US sold off
+        # overnight, VIX elevated, or the domestic index below its MA) new long
+        # entries are suppressed. Market-wide, so it's computed once per cycle by
+        # evaluate_regime() and read by _buy_vetoed(). Off unless a regime is
+        # evaluated (backtest never calls evaluate_regime -> no behavior change).
+        self.regime_risk_off = False
+        self.regime_reason = ""
+
         # Merge user-configured weights with defaults
         user_weights = params.get("indicator_weights", {})
         self.weights = dict(self.DEFAULT_WEIGHTS)
@@ -100,6 +108,63 @@ class SwingCompositeStrategy:
     def set_benchmark_data(self, benchmark_df):
         """Set market benchmark data (Nikkei, S&P 500, ...) for relative strength."""
         self.benchmark_df = benchmark_df
+
+    def evaluate_regime(self, benchmark_df=None, us_df=None, vix_df=None) -> bool:
+        """Assess the broad-market regime and cache a risk-off flag for the cycle.
+
+        Buy-only overlay (see _buy_vetoed): sets self.regime_risk_off True when
+        any enabled gate fires. Exits are never affected. Fail-open — a data
+        glitch on any single input just skips that gate (never freezes trading).
+
+        Gates (all opt-in via `regime_filter_*` params, OR-combined):
+          - US overnight: last US session (^GSPC) close-to-close return
+            <= regime_us_drop_pct. US closes before TSE opens, so a hard US
+            down day leads the JP session.
+          - VIX: latest ^VIX close >= regime_vix_above.
+          - Domestic trend: benchmark (^N225) close < its regime_ma_period SMA.
+        """
+        params = self.params
+        if not params.get("regime_filter_enabled", False):
+            self.regime_risk_off = False
+            self.regime_reason = ""
+            return False
+
+        reasons = []
+
+        def _closes(frame):
+            if frame is None or getattr(frame, "empty", True) or "Close" not in frame:
+                return None
+            s = frame["Close"].dropna()
+            return s if len(s) else None
+
+        # US overnight move.
+        drop_pct = params.get("regime_us_drop_pct")
+        us = _closes(us_df)
+        if drop_pct is not None and us is not None and len(us) >= 2:
+            ret = (us.iloc[-1] / us.iloc[-2] - 1.0) * 100.0
+            if ret <= drop_pct:
+                reasons.append(f"US overnight {ret:+.1f}% <= {drop_pct:.1f}%")
+
+        # VIX level.
+        vix_above = params.get("regime_vix_above")
+        vix = _closes(vix_df)
+        if vix_above is not None and vix is not None:
+            level = float(vix.iloc[-1])
+            if level >= vix_above:
+                reasons.append(f"VIX {level:.1f} >= {vix_above:.1f}")
+
+        # Domestic index below its moving average.
+        ma_period = params.get("regime_ma_period")
+        bench = _closes(benchmark_df if benchmark_df is not None else self.benchmark_df)
+        if ma_period and bench is not None and len(bench) >= ma_period:
+            ma = bench.rolling(int(ma_period)).mean().iloc[-1]
+            last = float(bench.iloc[-1])
+            if not pd.isna(ma) and last < ma:
+                reasons.append(f"{self.benchmark_name} below {int(ma_period)}d MA")
+
+        self.regime_risk_off = bool(reasons)
+        self.regime_reason = "risk-off: " + ", ".join(reasons) if reasons else ""
+        return self.regime_risk_off
 
     def set_ml_model(self, ml_model):
         """Set trained ML model for prediction scoring."""
@@ -220,6 +285,12 @@ class SwingCompositeStrategy:
         Returns (vetoed, reason).
         """
         reasons = []
+
+        # Market-regime gate — suppress new longs when the broad market is
+        # risk-off (US sold off overnight / VIX elevated / index below MA).
+        # Computed once per cycle by evaluate_regime(); market-wide.
+        if self.regime_risk_off:
+            reasons.append(self.regime_reason or "market risk-off")
 
         ml_floor = self.params.get("buy_veto_ml_proba_below", 0.45)
         if ml_floor and "ML_proba" in df.columns:
