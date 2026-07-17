@@ -93,23 +93,7 @@ class IBKRWebAPIBroker:
             # /iserver/accounts is empty; it flips to established=True within a
             # few seconds. Trading endpoints (orders/whatif) reject the account
             # ("accountId is not valid") until then, so retry until established.
-            established = False
-            for _ in range(10):
-                client.initialize_brokerage_session()
-                try:
-                    established = bool(
-                        client.authentication_status().data.get("established")
-                    )
-                except Exception:
-                    established = False
-                if established:
-                    break
-                time.sleep(2)
-            if not established:
-                raise ConnectionError(
-                    "IBKR brokerage session did not establish (still "
-                    "established=False after retries)"
-                )
+            self._ensure_brokerage_session(client)
             # Prime /iserver/accounts — required before market-data snapshots and
             # order endpoints, which otherwise 500 with 'Please query /accounts
             # first'.
@@ -151,6 +135,36 @@ class IBKRWebAPIBroker:
             self.connect()
             return self._client
 
+    def _ensure_brokerage_session(self, client=None) -> None:
+        """Ensure the iserver brokerage session is established, re-initing it.
+
+        The tickler keeps the SSO/web session alive (authentication_status
+        connected=True) but the brokerage (iserver) session still
+        de-establishes over time — IBKR drops it after idle periods and
+        overnight maintenance. When that happens authentication_status returns
+        established=False and every trading endpoint (orders, whatif, marketdata
+        snapshot) rejects the account with "accountId is not valid: <acct>",
+        even though the client is otherwise connected. `_ensure()` never heals
+        this because the client object is still non-None. Re-initialize until
+        established. Cheap when already established (a single status call).
+        """
+        client = client or self._client
+        if client is None:
+            return
+        with self._lock:
+            for _ in range(10):
+                try:
+                    if bool(client.authentication_status().data.get("established")):
+                        return
+                except Exception:
+                    pass
+                client.initialize_brokerage_session()
+                time.sleep(2)
+            raise ConnectionError(
+                "IBKR brokerage session not established (established=False "
+                "after re-init retries)"
+            )
+
     @staticmethod
     def _resolve_account_id(client) -> str:
         """Pick the account id the OAuth token controls."""
@@ -167,6 +181,11 @@ class IBKRWebAPIBroker:
             client = self._ensure()
             with self._lock:
                 client.tickle()
+            # tickle only proves the SSO/web session is alive; the iserver
+            # brokerage session can be de-established (established=False) while
+            # tickle still succeeds, which silently blocks all orders. Heal it
+            # here so the watchdog cycle keeps the order path usable.
+            self._ensure_brokerage_session(client)
             return True, "ok"
         except Exception as e:
             # Drop the (possibly dead) client so the next call reconnects.
@@ -251,6 +270,9 @@ class IBKRWebAPIBroker:
         """
         from ibind import OrderRequest
         client = self._ensure()
+        # The brokerage session may have de-established since connect(); re-init
+        # it now or the order is rejected with "accountId is not valid".
+        self._ensure_brokerage_session(client)
 
         action = side.upper().replace("STRONG_", "")  # STRONG_BUY -> BUY
         if action not in ("BUY", "SELL"):
