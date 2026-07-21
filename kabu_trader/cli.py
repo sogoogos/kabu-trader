@@ -789,6 +789,36 @@ def cmd_scan(args):
     console.print(table)
 
 
+def cmd_notify(args):
+    """Send arbitrary text (from --message or stdin) over LINE + email.
+
+    Lets host-side scripts that are deliberately dependency-free — such as
+    scripts/perf_report.py, which runs on the EC2 system python with no venv —
+    reuse the configured notification channels instead of re-implementing them.
+    """
+    from .notifier import LineNotifier
+    from .email_notifier import EmailNotifier
+
+    config = load_config(args.config)
+    market = get_market_settings(config)
+
+    body = (args.message if args.message else sys.stdin.read()).strip()
+    if not body:
+        console.print("[yellow]Nothing to send (empty message).[/yellow]")
+        return
+
+    subject = args.subject or "notification"
+    line = LineNotifier(
+        config.get("line", {}),
+        currency_symbol=market["currency_symbol"],
+        market_name=market["market_name"],
+    )
+    email = EmailNotifier(config.get("email", {}))
+    sent_line = line.send(f"{subject}\n\n{body}")
+    sent_email = email.send(f"[kabu-trader] {subject}", body)
+    console.print(f"Notification sent — LINE: {sent_line}, email: {sent_email}")
+
+
 def _monthly_performance(trades_csv: Path, initial_capital: float) -> list:
     """Realized trading performance broken down by calendar month.
 
@@ -994,6 +1024,15 @@ Examples:
     rp = subparsers.add_parser("report", help="Show paper trading report")
     rp.add_argument("--reset", action="store_true", help="Reset paper trading state")
     rp.set_defaults(func=cmd_report)
+
+    # Notify
+    nt = subparsers.add_parser(
+        "notify",
+        help="Send text (--message or stdin) via LINE + email",
+    )
+    nt.add_argument("--message", help="Text to send; read from stdin when omitted")
+    nt.add_argument("--subject", help="Subject line / message header")
+    nt.set_defaults(func=cmd_notify)
 
     # Monthly report
     mr = subparsers.add_parser(
