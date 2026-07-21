@@ -789,6 +789,152 @@ def cmd_scan(args):
     console.print(table)
 
 
+def _monthly_performance(trades_csv: Path, initial_capital: float) -> list:
+    """Realized trading performance broken down by calendar month.
+
+    The monthly return is measured against month-start *realized* equity —
+    initial capital plus every P&L booked before that month. Unrealized swings
+    on still-open positions deliberately do not move the base, so the number
+    only moves when a trade is actually closed.
+    """
+    import csv
+
+    monthly: dict = {}
+    if trades_csv.exists():
+        with open(trades_csv, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if row.get("action") != "SELL" or not row.get("pnl"):
+                    continue
+                bucket = monthly.setdefault(
+                    row["timestamp"][:7], {"pnl": 0.0, "wins": 0, "losses": 0}
+                )
+                pnl = float(row["pnl"])
+                bucket["pnl"] += pnl
+                if pnl >= 0:
+                    bucket["wins"] += 1
+                else:
+                    bucket["losses"] += 1
+
+    rows = []
+    equity = initial_capital
+    for month in sorted(monthly):
+        data = monthly[month]
+        start = equity
+        equity += data["pnl"]
+        rows.append({
+            "month": month,
+            "start_equity": start,
+            "pnl": data["pnl"],
+            "return_pct": (data["pnl"] / start * 100) if start else 0.0,
+            "end_equity": equity,
+            "wins": data["wins"],
+            "losses": data["losses"],
+        })
+    return rows
+
+
+def cmd_monthly_report(args):
+    """Report realized performance per month against the monthly return target."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from .notifier import LineNotifier
+    from .email_notifier import EmailNotifier
+
+    config = load_config(args.config)
+    market = get_market_settings(config)
+    sym = market["currency_symbol"]
+    backtest_cfg = config.get("backtest", {})
+    initial_capital = float(backtest_cfg.get("initial_capital", 1_000_000))
+    target_pct = float(backtest_cfg.get("monthly_target_pct", 0.05)) * 100
+
+    state_dir = Path(market["state_dir"]) if market["state_dir"] else Path(".")
+    rows = _monthly_performance(state_dir / "trades.csv", initial_capital)
+    if not rows:
+        console.print("[yellow]No closed trades yet — nothing to report.[/yellow]")
+        return
+
+    broker_cfg = config.get("broker", {})
+    is_live = broker_cfg.get("enabled", False) and not broker_cfg.get("paper", True)
+    mode_label = "Live" if is_live else "Paper"
+
+    # Default to the last *completed* month so a run on the 1st reports the
+    # month that just ended rather than a one-day-old empty one.
+    tz = ZoneInfo(config.get("monitor", {}).get("timezone", "Asia/Tokyo"))
+    now = datetime.now(tz)
+    prev_month = (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    target_month = args.month or prev_month
+
+    table = Table(
+        title=f"{mode_label} Monthly Performance [{market['market_name']}] "
+              f"(target {target_pct:+.1f}%/month)",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    for col, just in (("Month", "left"), ("Start equity", "right"),
+                      ("Realized P&L", "right"), ("Return", "right"),
+                      ("Target", "center"), ("W/L", "right")):
+        table.add_column(col, justify=just)
+    for row in rows:
+        hit = row["return_pct"] >= target_pct
+        color = "green" if row["pnl"] >= 0 else "red"
+        table.add_row(
+            row["month"],
+            f"{sym}{row['start_equity']:,.0f}",
+            f"[{color}]{row['pnl']:+,.0f}[/{color}]",
+            f"[{color}]{row['return_pct']:+.1f}%[/{color}]",
+            "[green]HIT[/green]" if hit else "[red]MISS[/red]",
+            f"{row['wins']}/{row['losses']}",
+        )
+    console.print(table)
+
+    total_pnl = rows[-1]["end_equity"] - initial_capital
+    console.print(
+        f"Cumulative realized: {sym}{total_pnl:+,.0f} "
+        f"({total_pnl / initial_capital * 100:+.1f}% since inception)"
+    )
+
+    if not args.notify:
+        return
+
+    match = next((r for r in rows if r["month"] == target_month), None)
+    if match is None:
+        console.print(
+            f"[yellow]No closed trades in {target_month}; skipping notification.[/yellow]"
+        )
+        return
+
+    shortfall = match["start_equity"] * target_pct / 100 - match["pnl"]
+    verdict = "HIT" if match["return_pct"] >= target_pct else "MISS"
+    lines = [
+        f"[{market['market_name']}] {mode_label} monthly report {target_month}",
+        f"Realized P&L: {sym}{match['pnl']:+,.0f} ({match['return_pct']:+.1f}%)",
+        f"Target {target_pct:+.1f}% -> {verdict}"
+        + (f" (short by {sym}{shortfall:,.0f})" if verdict == "MISS" else ""),
+        f"Month-start equity: {sym}{match['start_equity']:,.0f}",
+        f"Closed trades: {match['wins'] + match['losses']} "
+        f"(W{match['wins']}/L{match['losses']})",
+        f"Cumulative realized: {sym}{total_pnl:+,.0f} "
+        f"({total_pnl / initial_capital * 100:+.1f}%)",
+    ]
+    message = "\n".join(lines)
+
+    line = LineNotifier(
+        config.get("line", {}),
+        currency_symbol=sym,
+        market_name=market["market_name"],
+    )
+    email = EmailNotifier(config.get("email", {}))
+    sent_line = line.send(message)
+    sent_email = email.send(
+        f"[kabu-trader] {mode_label} monthly report {target_month} ({verdict})",
+        message,
+    )
+    console.print(
+        f"Notification sent — LINE: {sent_line}, email: {sent_email}"
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Kabu Trader - Japanese Stock Swing Trading System",
@@ -848,6 +994,15 @@ Examples:
     rp = subparsers.add_parser("report", help="Show paper trading report")
     rp.add_argument("--reset", action="store_true", help="Reset paper trading state")
     rp.set_defaults(func=cmd_report)
+
+    # Monthly report
+    mr = subparsers.add_parser(
+        "monthly-report",
+        help="Realized performance per month vs the monthly return target",
+    )
+    mr.add_argument("--month", help="Month to notify about (YYYY-MM); default: last month")
+    mr.add_argument("--notify", action="store_true", help="Send the report via LINE + email")
+    mr.set_defaults(func=cmd_monthly_report)
 
     # Reconcile
     rc = subparsers.add_parser(
