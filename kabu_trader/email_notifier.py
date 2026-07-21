@@ -17,6 +17,7 @@ import os
 import smtplib
 import ssl
 from email.message import EmailMessage
+from html import escape
 
 
 class EmailNotifier:
@@ -44,8 +45,14 @@ class EmailNotifier:
             print("Warning: email enabled but missing sender/recipient/app_password.")
             self.enabled = False
 
-    def send(self, subject: str, body: str) -> bool:
-        """Send an email. Returns True on success, False otherwise (never raises)."""
+    def send(self, subject: str, body: str, monospace: bool = False) -> bool:
+        """Send an email. Returns True on success, False otherwise (never raises).
+
+        Set monospace for preformatted bodies (tables, column-aligned reports).
+        Mail clients render plain text in a proportional font, which shreds any
+        column alignment, so an HTML <pre> alternative is attached alongside the
+        plain-text part.
+        """
         if not self.enabled:
             return False
 
@@ -54,6 +61,14 @@ class EmailNotifier:
         msg["To"] = self.recipient
         msg["Subject"] = subject
         msg.set_content(body)
+        if monospace:
+            msg.add_alternative(
+                "<html><body>"
+                '<pre style="font-family:ui-monospace,Menlo,Consolas,monospace;'
+                'font-size:13px;line-height:1.4">'
+                f"{escape(body)}</pre></body></html>",
+                subtype="html",
+            )
 
         try:
             context = ssl.create_default_context()
