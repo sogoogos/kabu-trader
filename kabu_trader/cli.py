@@ -815,7 +815,8 @@ def cmd_notify(args):
     )
     email = EmailNotifier(config.get("email", {}))
     sent_line = line.send(f"{subject}\n\n{body}")
-    sent_email = email.send(f"[kabu-trader] {subject}", body)
+    # Piped input is preformatted by whatever produced it, so keep it monospace.
+    sent_email = email.send(f"[kabu-trader] {subject}", body, monospace=True)
     console.print(f"Notification sent — LINE: {sent_line}, email: {sent_email}")
 
 
@@ -947,14 +948,29 @@ def cmd_monthly_report(args):
         f"Cumulative realized: {sym}{total_pnl:+,.0f} "
         f"({total_pnl / initial_capital * 100:+.1f}%)",
     ]
+    # Compact history. Deliberately not the rich table — LINE and most mail
+    # clients render in a proportional font, which turns box-drawing borders
+    # into noise, so this stays to short one-line-per-month entries.
+    lines.append("")
+    lines.append("History:")
+    for row in rows:
+        lines.append(
+            f"  {row['month']}  {row['return_pct']:+6.1f}%  "
+            f"{'HIT' if row['return_pct'] >= target_pct else 'MISS'}"
+        )
     message = "\n".join(lines)
 
+    # The notifiers are only enabled in the live config — paper deliberately
+    # stays silent so day-to-day paper fills don't spend the LINE quota. Reading
+    # the channel config from a different file lets the paper ledger still be
+    # reported without turning paper notifications on wholesale.
+    notify_cfg = load_config(args.notify_config) if args.notify_config else config
     line = LineNotifier(
-        config.get("line", {}),
+        notify_cfg.get("line", {}),
         currency_symbol=sym,
         market_name=market["market_name"],
     )
-    email = EmailNotifier(config.get("email", {}))
+    email = EmailNotifier(notify_cfg.get("email", {}))
     sent_line = line.send(message)
     sent_email = email.send(
         f"[kabu-trader] {mode_label} monthly report {target_month} ({verdict})",
@@ -1041,6 +1057,11 @@ Examples:
     )
     mr.add_argument("--month", help="Month to notify about (YYYY-MM); default: last month")
     mr.add_argument("--notify", action="store_true", help="Send the report via LINE + email")
+    mr.add_argument(
+        "--notify-config",
+        help="Read line/email channel settings from this config instead "
+             "(paper ledgers deliver through the live config)",
+    )
     mr.set_defaults(func=cmd_monthly_report)
 
     # Reconcile
