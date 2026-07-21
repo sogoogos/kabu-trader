@@ -83,6 +83,7 @@ class Monitor:
         self._last_sentiment_time: float = 0  # timestamp of last sentiment refresh
         self._last_earnings_time: float = 0  # timestamp of last earnings refresh
         self._last_summary_date: str = ""  # YYYY-MM-DD of last daily summary sent
+        self._last_gap_alert_date: str = ""  # YYYY-MM-DD of last pre-open gap-risk check
         self._last_sunday_reminder_date: str = ""  # YYYY-MM-DD of last Sunday reminder sent
         self._last_actions_check: float = 0  # timestamp of last corporate-actions check
         self._last_retrain_week: int = -1  # ISO week number of last retrain
@@ -714,6 +715,75 @@ class Monitor:
                 f"({self.strategy.regime_reason})[/bold yellow]"
             )
 
+    def _check_gap_risk(self):
+        """Pre-open overnight gap-down alert (notify-only, no auto-trading).
+
+        The bot only trades the 09:00-15:00 regular session, so a hard overnight
+        US selloff / VIX spike (which leads the JP open) leaves held positions
+        exposed to a gap-down that the bot can't exit until the open. This sends
+        one LINE+email heads-up in the pre-open window so the operator can act
+        manually if they want — it never places an order. Uses the same US/VIX
+        inputs as the regime filter but NOT the N225-MA gate (that's a trend
+        signal, not an overnight-gap predictor). Opt-in via `gap_alert_enabled`;
+        runs once per day, weekdays only.
+        """
+        params = self.strategy_params
+        if not params.get("gap_alert_enabled", False):
+            return
+        if not self.paper_trader or not self.paper_trader.positions:
+            return
+        now = datetime.now(self.tz)
+        if now.weekday() >= 5:
+            return
+        start_h, start_m = map(int, self.monitor_config["trading_hours_start"].split(":"))
+        open_t = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+        # Window: 2h before the open (US cash close is final by then year-round)
+        # through the open. One check per day.
+        if not (open_t - timedelta(hours=2) <= now < open_t):
+            return
+        today = now.strftime("%Y-%m-%d")
+        if self._last_gap_alert_date == today:
+            return
+        self._last_gap_alert_date = today  # US close is final; one check suffices
+
+        reasons = []
+        us_ticker = params.get("regime_us_ticker", "^GSPC")
+        drop_pct = params.get("gap_alert_us_drop_pct", params.get("regime_us_drop_pct", -1.5))
+        try:
+            us = self.fetcher.fetch_historical(us_ticker, days=10)["Close"].dropna()
+            if len(us) >= 2:
+                ret = (us.iloc[-1] / us.iloc[-2] - 1.0) * 100.0
+                if ret <= drop_pct:
+                    reasons.append(f"{us_ticker} {ret:+.1f}% overnight")
+        except Exception:
+            pass
+        vix_ticker = params.get("regime_vix_ticker", "^VIX")
+        vix_above = params.get("regime_vix_above", 25.0)
+        try:
+            vix = self.fetcher.fetch_historical(vix_ticker, days=10)["Close"].dropna()
+            if len(vix) and float(vix.iloc[-1]) >= vix_above:
+                reasons.append(f"{vix_ticker} {float(vix.iloc[-1]):.1f}")
+        except Exception:
+            pass
+        if not reasons:
+            return
+
+        held = ", ".join(
+            f"{self.names.get(t, t)} ({t})" for t in self.paper_trader.positions
+        )
+        subject = f"[kabu-trader {self.market_name}] Overnight gap-down risk at open"
+        msg = (
+            f"⚠️ [{self.market_name}] Overnight gap-down risk [{self._mode_tag}]\n"
+            f"Trigger: {', '.join(reasons)}\n"
+            f"Holdings may open lower: {held}\n"
+            f"Bot exits fire only after {self.monitor_config['trading_hours_start']} "
+            f"— review if you want to act pre-open."
+        )
+        self._notify(subject, msg, force_email=True)
+        self.console.print(
+            f"[bold yellow]Gap-risk alert sent: {', '.join(reasons)}[/bold yellow]"
+        )
+
     def _analyze_signals(self):
         """Fetch recent data and analyze signals for all watchlist stocks."""
         self.alerts = []
@@ -1067,6 +1137,7 @@ class Monitor:
                     self._send_daily_summary()
                     self._send_sunday_reminder()
                     self._check_broker_health()  # active 30 min before open
+                    self._check_gap_risk()  # pre-open overnight gap-down alert
                     self._auto_retrain()
                     now = datetime.now(self.tz).strftime("%H:%M:%S")
                     self.console.print(
