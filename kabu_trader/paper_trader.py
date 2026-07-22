@@ -435,8 +435,16 @@ class PaperTrader:
                 tickers_to_close.append((ticker, price, "stop_loss"))
             elif pnl_pct >= self.take_profit_pct * 100:
                 tickers_to_close.append((ticker, price, "take_profit"))
-            elif self.trailing_stop_enabled and pnl_pct >= self.trailing_stop_activate_pct * 100:
-                # Trailing stop has armed — exit if price drops far enough below the high.
+            elif self.trailing_stop_enabled and pos.high_water_mark >= (
+                pos.entry_price * (1 + self.trailing_stop_activate_pct)
+            ):
+                # Arming latches off the high-water mark, not the current P&L.
+                # Gating on the current P&L meant the position had to STILL be
+                # up activate_pct at the moment it was already distance_pct
+                # below its high — so the trailing stop could only ever fire
+                # once the peak passed (1+activate)/(1-distance), ~+8.2% at the
+                # 5%/3% defaults. Anything that peaked between +5% and +8.2%
+                # was never protected and rode the whole gain back down.
                 trailing_floor = pos.high_water_mark * (1 - self.trailing_stop_distance_pct)
                 if price < trailing_floor:
                     tickers_to_close.append((ticker, price, "trailing_stop"))
