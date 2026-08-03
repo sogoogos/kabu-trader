@@ -422,6 +422,44 @@ def cmd_reconcile(args):
         )
 
 
+def _benchmark_buy_hold(fetcher, benchmark_ticker: str, start_date: str,
+                        end_date: str = None):
+    """Buy-and-hold % return of the benchmark between two dates.
+
+    From the first bar on-or-after start_date to the last bar on-or-before
+    end_date (or the latest bar when end_date is None). Returns a float
+    percentage, or None if it cannot be computed (missing start, fetch failure,
+    no bars in range) — callers must treat None as "comparison unavailable" and
+    never let it break the report. This is a like-for-like elapsed-period
+    comparison: what simply holding the index over the same span would return.
+    """
+    if not start_date:
+        return None
+    try:
+        from datetime import datetime as _dt
+
+        start = _dt.strptime(start_date[:10], "%Y-%m-%d")
+        end = _dt.strptime(end_date[:10], "%Y-%m-%d") if end_date else None
+        # fetch_historical(days=N) is anchored to TODAY (the most recent N days),
+        # so the window must always span start..now to include the start bar —
+        # even when end is in the past, we still fetch up to now and slice down
+        # to end below. Sizing to start..end would miss the start when end is old.
+        span_days = (_dt.now() - start).days + 10
+        hist = fetcher.fetch_historical(benchmark_ticker, days=span_days)
+        if hist is None or hist.empty or "Close" not in hist:
+            return None
+        close = hist["Close"].dropna()
+        idx = close.index.tz_localize(None)
+        after = close[idx >= start]
+        before = close[idx <= end] if end is not None else close
+        if after.empty or before.empty:
+            return None
+        return (before.iloc[-1] / after.iloc[0] - 1) * 100
+    except Exception as exc:  # never break the report over a benchmark fetch
+        print(f"Benchmark comparison unavailable: {type(exc).__name__}: {exc}")
+        return None
+
+
 def cmd_report(args):
     """Show paper trading report."""
     from .paper_trader import PaperTrader
@@ -455,6 +493,21 @@ def cmd_report(args):
     mode_label = "Live" if is_live else "Paper"
     ret = summary["total_return_pct"]
     ret_color = "green" if ret > 0 else "red"
+
+    # Benchmark: what buying and holding the index since inception would have
+    # returned over the same span. daily_snapshots[0] is stamped when the
+    # strategy first ran, so its date is the inception marker.
+    inception = trader.daily_snapshots[0]["date"] if trader.daily_snapshots else ""
+    bench = _benchmark_buy_hold(fetcher, market["benchmark_ticker"], inception)
+    bench_line = ""
+    if bench is not None:
+        diff = ret - bench
+        bcolor = "green" if diff >= 0 else "red"
+        bench_line = (
+            f"\nvs {market['benchmark_name']} buy & hold: {bench:+.2f}%  "
+            f"[{bcolor}](strategy {diff:+.2f} pt)[/{bcolor}]"
+        )
+
     console.print(Panel(
         f"Initial: {sym}{summary['initial_capital']:,.2f}\n"
         f"Current: {sym}{summary['total_value']:,.2f} [{ret_color}]({ret:+.2f}%)[/{ret_color}]\n"
@@ -463,7 +516,8 @@ def cmd_report(args):
         f"Closed trades: {summary['total_closed_trades']} "
         f"(W: {summary['winning_trades']} / L: {summary['losing_trades']} | "
         f"Win rate: {summary['win_rate']:.0f}%)\n"
-        f"Total realized P&L: {sym}{summary['total_pnl']:+,.2f}",
+        f"Total realized P&L: {sym}{summary['total_pnl']:+,.2f}"
+        f"{bench_line}",
         title=f"{mode_label} Trading Report [{market['market_name']}]",
         border_style="bold red" if is_live else "bold cyan",
     ))
@@ -948,6 +1002,24 @@ def cmd_monthly_report(args):
         f"Cumulative realized: {sym}{total_pnl:+,.0f} "
         f"({total_pnl / initial_capital * 100:+.1f}%)",
     ]
+
+    # Benchmark: index buy-and-hold over the reported month, so the operator can
+    # always see whether the strategy beat simply holding the index. Fail-open —
+    # a benchmark fetch failure just drops the line, never the report.
+    from datetime import date as _date
+    import calendar as _cal
+    yr, mo = int(target_month[:4]), int(target_month[5:7])
+    m_start = f"{target_month}-01"
+    m_end = f"{target_month}-{_cal.monthrange(yr, mo)[1]:02d}"
+    fetcher = DataFetcher(benchmark_ticker=market["benchmark_ticker"])
+    bench = _benchmark_buy_hold(fetcher, market["benchmark_ticker"], m_start, m_end)
+    if bench is not None:
+        diff = match["return_pct"] - bench
+        lines.append(
+            f"vs {market['benchmark_name']} buy&hold {target_month}: "
+            f"{bench:+.1f}% (strategy {diff:+.1f} pt)"
+        )
+
     # Compact history. Deliberately not the rich table — LINE and most mail
     # clients render in a proportional font, which turns box-drawing borders
     # into noise, so this stays to short one-line-per-month entries.
