@@ -422,6 +422,69 @@ def cmd_reconcile(args):
         )
 
 
+def _market_snapshot(config, market, fetcher):
+    """Broad-market trend snapshot as the bot sees it.
+
+    Returns a dict with the benchmark / US index / VIX levels and the SAME
+    risk-off verdict the monitor acts on (computed via the strategy's
+    evaluate_regime, not re-derived here, so the display can never disagree with
+    trading behaviour). Returns None if nothing could be fetched — callers must
+    treat None as "unavailable" and never let it break the report. Per-input
+    fail-open: a missing feed just drops that line and its regime gate.
+    """
+    try:
+        params = config.get("strategy", {}).get("params", {})
+        strat = SwingCompositeStrategy(params, market["benchmark_name"])
+        ma_period = int(params.get("regime_ma_period", 25) or 25)
+
+        def _hist(ticker, days):
+            try:
+                df = fetcher.fetch_historical(ticker, days=days)
+                if df is None or df.empty or "Close" not in df:
+                    return None
+                s = df["Close"].dropna()
+                return df if len(s) else None
+            except Exception:
+                return None
+
+        bench_df = _hist(market["benchmark_ticker"], ma_period + 20)
+        us_df = _hist(params.get("regime_us_ticker", "^GSPC"), 10)
+        vix_df = _hist(params.get("regime_vix_ticker", "^VIX"), 10)
+        if bench_df is None and us_df is None and vix_df is None:
+            return None
+
+        # Exactly the bot's regime verdict for this data.
+        strat.evaluate_regime(bench_df, us_df, vix_df)
+
+        def _metrics(df, want_ma=False):
+            if df is None:
+                return None
+            c = df["Close"].dropna()
+            last = float(c.iloc[-1])
+            prev = float(c.iloc[-2]) if len(c) >= 2 else last
+            chg = (last / prev - 1) * 100 if prev else 0.0
+            ma_pct = None
+            if want_ma and len(c) >= ma_period:
+                ma = c.rolling(ma_period).mean().iloc[-1]
+                if ma == ma:  # not NaN
+                    ma_pct = (last / float(ma) - 1) * 100
+            return {"level": last, "chg": chg, "ma_pct": ma_pct}
+
+        return {
+            "benchmark_name": market["benchmark_name"],
+            "ma_period": ma_period,
+            "benchmark": _metrics(bench_df, want_ma=True),
+            "us": _metrics(us_df),
+            "vix": _metrics(vix_df),
+            "risk_off": strat.regime_risk_off,
+            "reason": strat.regime_reason,
+            "regime_enabled": bool(params.get("regime_filter_enabled", False)),
+        }
+    except Exception as exc:
+        print(f"Market snapshot unavailable: {type(exc).__name__}: {exc}")
+        return None
+
+
 def _benchmark_buy_hold(fetcher, benchmark_ticker: str, start_date: str,
                         end_date: str = None):
     """Buy-and-hold % return of the benchmark between two dates.
@@ -521,6 +584,38 @@ def cmd_report(args):
         title=f"{mode_label} Trading Report [{market['market_name']}]",
         border_style="bold red" if is_live else "bold cyan",
     ))
+
+    # Market snapshot: overall trend the bot sees, plus its risk-off verdict.
+    snap = _market_snapshot(config, market, fetcher)
+    if snap is not None:
+        rows = []
+
+        def _mv(label, m, is_vix=False):
+            if not m:
+                return
+            c = "green" if m["chg"] >= 0 else "red"
+            lvl = f"{m['level']:.1f}" if is_vix else f"{m['level']:,.0f}"
+            extra = ""
+            if m.get("ma_pct") is not None:
+                mc = "green" if m["ma_pct"] >= 0 else "red"
+                extra = f"  vs {snap['ma_period']}dMA [{mc}]{m['ma_pct']:+.1f}%[/{mc}]"
+            rows.append(f"{label}: {lvl} [{c}]({m['chg']:+.1f}%)[/{c}]{extra}")
+
+        _mv(snap["benchmark_name"], snap["benchmark"])
+        _mv("S&P 500", snap["us"])
+        _mv("VIX", snap["vix"], is_vix=True)
+        if snap["regime_enabled"]:
+            if snap["risk_off"]:
+                rows.append(f"Regime: [red]RISK-OFF[/red] — new buys suppressed "
+                            f"({snap['reason']})")
+            else:
+                rows.append("Regime: [green]RISK-ON[/green] — new buys allowed")
+        if rows:
+            console.print(Panel(
+                "\n".join(rows),
+                title="Market",
+                border_style="dim",
+            ))
 
     # Open positions
     if trader.positions:
@@ -1019,6 +1114,22 @@ def cmd_monthly_report(args):
             f"vs {market['benchmark_name']} buy&hold {target_month}: "
             f"{bench:+.1f}% (strategy {diff:+.1f} pt)"
         )
+
+    # Current market trend + regime, so the email shows where things stand now
+    # (distinct from the reported month's result above — hence "Market now").
+    snap = _market_snapshot(config, market, fetcher)
+    if snap is not None:
+        parts = []
+        if snap["benchmark"]:
+            b = snap["benchmark"]
+            ma = f" ({snap['ma_period']}dMA {b['ma_pct']:+.1f}%)" if b.get("ma_pct") is not None else ""
+            parts.append(f"{snap['benchmark_name']} {b['level']:,.0f} {b['chg']:+.1f}%{ma}")
+        if snap["vix"]:
+            parts.append(f"VIX {snap['vix']['level']:.1f}")
+        if snap["regime_enabled"]:
+            parts.append("RISK-OFF" if snap["risk_off"] else "RISK-ON")
+        if parts:
+            lines.append("Market now: " + " | ".join(parts))
 
     # Compact history. Deliberately not the rich table — LINE and most mail
     # clients render in a proportional font, which turns box-drawing borders
