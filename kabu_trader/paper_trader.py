@@ -162,6 +162,16 @@ class PaperTrader:
         # Without this, a take-profit / trailing-stop exit immediately re-opens
         # the position because the composite score is still bullish.
         self.reentry_cooldown_days = config.get("reentry_cooldown_days", 1)
+        # Live-order price buffer: the broker checks a MKT buy against the
+        # live quote plus its own price-cap margin, not our signal-time price.
+        # A buy that fits self.cash at the signal price can still bounce at
+        # the broker ("Cash needed ... > Available"), and since the signal
+        # re-fires every cycle the same reject + alert email repeats until
+        # cash or the price moves (observed 8× on 3697.T, Aug 2026, gap ~5%).
+        # Before submitting, require the order to still fit if it filled this
+        # fraction above the signal price; downsize (US, lot=1) or skip (JP,
+        # lot=100) otherwise.
+        self.live_buy_price_buffer_pct = config.get("live_buy_price_buffer_pct", 0.05)
 
         if state_dir:
             state_path = Path(state_dir)
@@ -506,6 +516,30 @@ class PaperTrader:
 
         if cost + commission > self.cash:
             return None
+
+        # Only submit live orders that survive the price buffer (see
+        # live_buy_price_buffer_pct in __init__). Shrink to what fits at the
+        # padded price; below one lot there is nothing valid to submit
+        # (TSE trades in 100-share units — the broker's "suggestedSize: 99"
+        # is not actionable), so skip quietly and wait for more cash or a
+        # cheaper candidate. No alert: nothing was sent to the broker.
+        if self.live_broker is not None:
+            padded_price = price * (1 + self.live_buy_price_buffer_pct)
+            affordable = int(
+                self.cash / (padded_price * (1 + self.commission_rate)) / lot
+            ) * lot
+            if affordable < shares:
+                if affordable < lot:
+                    print(f"Live BUY {ticker}: skipped — {shares} shares @¥{price:,.2f} "
+                          f"won't fit cash ¥{self.cash:,.2f} with "
+                          f"{self.live_buy_price_buffer_pct:.0%} price buffer")
+                    return None
+                print(f"Live BUY {ticker}: downsized {shares} → {affordable} shares "
+                      f"to fit cash ¥{self.cash:,.2f} with "
+                      f"{self.live_buy_price_buffer_pct:.0%} price buffer")
+                shares = affordable
+                cost = price * shares
+                commission = cost * self.commission_rate
 
         # Live order routing — submit before mutating local state. If the
         # broker rejects, we abort the local update so paper state stays
