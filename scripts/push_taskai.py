@@ -72,6 +72,40 @@ def _fetch_prices_with_timeout(benchmark_ticker: str, tickers) -> dict:
     return result
 
 
+def _market_worker(config, market, q) -> None:
+    """子プロセスで市場スナップショット（指数・レジーム）を取得し queue に入れる。"""
+    try:
+        from kabu_trader.cli import _market_snapshot
+        from kabu_trader.data_fetcher import DataFetcher
+
+        fetcher = DataFetcher(benchmark_ticker=market["benchmark_ticker"])
+        q.put(_market_snapshot(config, market, fetcher))
+    except Exception as e:  # noqa: BLE001 - best effort
+        print(f"market snapshot failed: {e}", file=sys.stderr)
+        q.put(None)
+
+
+def _fetch_market_with_timeout(config, market):
+    """市場スナップショット取得を子プロセスに分離。PRICE_TIMEOUT 超過で None。
+
+    _market_snapshot も yfinance を呼ぶため、価格取得と同じく子プロセスごと
+    kill してハングを防ぐ。取得できなければ None（アプリ側で非表示にできる）。
+    """
+    ctx = mp.get_context("fork")
+    q = ctx.Queue()
+    proc = ctx.Process(target=_market_worker, args=(config, market, q), daemon=True)
+    proc.start()
+    try:
+        result = q.get(timeout=PRICE_TIMEOUT)
+    except Exception:  # noqa: BLE001 - Empty(timeout) 含む
+        result = None
+        print(f"market snapshot timed out after {PRICE_TIMEOUT}s", file=sys.stderr)
+    finally:
+        proc.terminate()
+        proc.join(5)
+    return result
+
+
 def _log(msg: str) -> None:
     print(f"[push] {msg}", file=sys.stderr, flush=True)
 
@@ -232,6 +266,16 @@ def build_payload(config: dict) -> tuple[dict, str]:
     signals, signals_at = _read_signals(trader.state_dir)
     _log(f"signals: {len(signals)} (as of {signals_at or 'n/a'})")
 
+    # Market snapshot (index levels / VIX / regime) so the app can show overall
+    # market direction. Best-effort, bounded like the price fetch; None when
+    # unavailable — the app should just hide the block. PUSH_SKIP_PRICES also
+    # skips this (same "no network this run" intent).
+    market_snap = None
+    if not os.environ.get("PUSH_SKIP_PRICES"):
+        _log("fetching market snapshot...")
+        market_snap = _fetch_market_with_timeout(config, market)
+        _log(f"market snapshot: {'ok' if market_snap else 'unavailable'}")
+
     payload = {
         "is_live": is_live,
         "summary": summary,
@@ -240,6 +284,7 @@ def build_payload(config: dict) -> tuple[dict, str]:
         "strategy": build_strategy(config, market),
         "signals": signals,
         "signals_at": signals_at,
+        "market": market_snap,
     }
     return payload, sym
 
@@ -249,11 +294,13 @@ def main() -> int:
     ap.add_argument("-c", "--config", required=True, help="config json path")
     ap.add_argument("--source", required=True, help="market id (jp/us/live)")
     ap.add_argument("--label", default=None, help="display label")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="build and print the payload instead of POSTing")
     args = ap.parse_args()
 
     url = os.environ.get("TASKAI_INGEST_URL")
     token = os.environ.get("TASKAI_INGEST_TOKEN")
-    if not url or not token:
+    if not (url and token) and not args.dry_run:
         print("TASKAI_INGEST_URL / TASKAI_INGEST_TOKEN must be set", file=sys.stderr)
         return 2
 
@@ -263,6 +310,12 @@ def main() -> int:
     body = json.dumps(
         {"source": args.source, "label": args.label, "currency": sym, "payload": payload}
     ).encode("utf-8")
+
+    if args.dry_run:
+        print(json.dumps({"source": args.source, "label": args.label,
+                          "currency": sym, "payload": {"market": payload["market"]}},
+                         ensure_ascii=False, indent=2))
+        return 0
 
     req = urllib.request.Request(
         url,
