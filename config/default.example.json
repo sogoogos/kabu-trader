@@ -915,7 +915,9 @@
       "regime_vix_above": 25.0,
       "regime_ma_period": 25,
       "gap_alert_enabled": false,
-      "gap_alert_us_drop_pct": -1.5
+      "gap_alert_us_drop_pct": -1.5,
+      "rates_us_ticker": "^TNX",
+      "rates_tilt_rise_bp": 15
     }
   },
   "backtest": {
