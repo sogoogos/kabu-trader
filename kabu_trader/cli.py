@@ -450,7 +450,24 @@ def _market_snapshot(config, market, fetcher):
         bench_df = _hist(market["benchmark_ticker"], ma_period + 20)
         us_df = _hist(params.get("regime_us_ticker", "^GSPC"), 10)
         vix_df = _hist(params.get("regime_vix_ticker", "^VIX"), 10)
-        if bench_df is None and us_df is None and vix_df is None:
+
+        # Yields (JGB 2y/10y from MOF, US 10y). Display-only here; the
+        # strategy's `rates` scorer reads the same tracker in the monitor.
+        rates = {}
+        try:
+            from .rates import RatesTracker
+            state_dir = market.get("state_dir")
+            cache = Path(state_dir) / "jgb_history.csv" if state_dir else None
+            tracker = RatesTracker(
+                fetcher=fetcher,
+                us_ticker=params.get("rates_us_ticker", "^TNX"),
+                cache_path=cache,
+            )
+            rates = tracker.refresh()
+        except Exception:
+            rates = {}
+
+        if bench_df is None and us_df is None and vix_df is None and not rates:
             return None
 
         # Exactly the bot's regime verdict for this data.
@@ -476,6 +493,8 @@ def _market_snapshot(config, market, fetcher):
             "benchmark": _metrics(bench_df, want_ma=True),
             "us": _metrics(us_df),
             "vix": _metrics(vix_df),
+            "rates": rates,
+            "rates_text": RatesTracker.describe(rates) if rates else "",
             "risk_off": strat.regime_risk_off,
             "reason": strat.regime_reason,
             "regime_enabled": bool(params.get("regime_filter_enabled", False)),
@@ -604,6 +623,8 @@ def cmd_report(args):
         _mv(snap["benchmark_name"], snap["benchmark"])
         _mv("S&P 500", snap["us"])
         _mv("VIX", snap["vix"], is_vix=True)
+        if snap.get("rates_text"):
+            rows.append(f"Rates: {snap['rates_text']}")
         if snap["regime_enabled"]:
             if snap["risk_off"]:
                 rows.append(f"Regime: [red]RISK-OFF[/red] — new buys suppressed "
@@ -900,6 +921,21 @@ def cmd_scan(args):
         strategy.set_sentiment_data(sentiment_data)
         console.print(f"[bold green]Sentiment analyzed for {len(sentiment_data)} stocks[/bold green]")
 
+    # Rate inputs for the `rates` sector-tilt scorer (silent unless weighted).
+    try:
+        from .rates import RatesTracker
+        rates_cache = Path(market["state_dir"]) / "jgb_history.csv" if market.get("state_dir") else None
+        rates_data = RatesTracker(
+            fetcher=fetcher,
+            us_ticker=config["strategy"]["params"].get("rates_us_ticker", "^TNX"),
+            cache_path=rates_cache,
+        ).refresh()
+        strategy.set_rates_data(rates_data)
+        if rates_data:
+            console.print(f"[bold green]Rates: {RatesTracker.describe(rates_data)}[/bold green]")
+    except Exception as e:
+        console.print(f"[yellow]Rates unavailable: {e}[/yellow]")
+
     console.print("[bold]Fetching data...[/bold]")
     benchmark_df = fetcher.fetch_benchmark(days=60)
     strategy.set_benchmark_data(benchmark_df)
@@ -1126,6 +1162,8 @@ def cmd_monthly_report(args):
             parts.append(f"{snap['benchmark_name']} {b['level']:,.0f} {b['chg']:+.1f}%{ma}")
         if snap["vix"]:
             parts.append(f"VIX {snap['vix']['level']:.1f}")
+        if snap.get("rates_text"):
+            parts.append(snap["rates_text"])
         if snap["regime_enabled"]:
             parts.append("RISK-OFF" if snap["risk_off"] else "RISK-ON")
         if parts:

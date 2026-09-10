@@ -77,6 +77,14 @@ class Monitor:
             config.get("llm_sentiment", {}), cache_path=sentiment_cache_path,
         )
         self.earnings = EarningsTracker()
+        # Rate inputs (JGB via MOF, US 10y via yfinance). The ~1 MB MOF history
+        # file is cached under state_dir so restarts don't refetch it.
+        from .rates import RatesTracker
+        self.rates = RatesTracker(
+            fetcher=self.fetcher,
+            us_ticker=self.strategy_params.get("rates_us_ticker", "^TNX"),
+            cache_path=(self.state_dir_path / "jgb_history.csv") if self.state_dir_path else None,
+        )
         self.corporate_actions = CorporateActionsTracker()
         self.config = config
         self._sent_signals: set = set()  # track sent alerts to avoid duplicates
@@ -684,6 +692,28 @@ class Monitor:
                         f"[bold yellow]Breaking news alert sent for {name}[/bold yellow]"
                     )
 
+    def _refresh_rates(self):
+        """Refresh JGB / US yield inputs once a day (fail-open).
+
+        The MOF close lands after the TSE session, so the value the bot sees
+        during a session is the previous business day's — the same lag as the
+        regime filter's US inputs. A fetch failure keeps the previous data (or
+        none), which makes the `rates` scorer silent rather than wrong.
+        """
+        import time as _time
+        if self.rates.data and _time.time() - self.rates._last_refresh < self.rates.refresh_interval:
+            return
+        try:
+            data = self.rates.refresh()
+        except Exception as e:  # noqa: BLE001
+            self.console.print(f"[yellow]Rates refresh failed: {e}[/yellow]")
+            return
+        self.strategy.set_rates_data(data)
+        for err in self.rates.errors:
+            self.console.print(f"[yellow]Rates: {err}[/yellow]")
+        if data:
+            self.console.print(f"[bold green]Rates: {self.rates.describe(data)}[/bold green]")
+
     def _evaluate_market_regime(self, benchmark_df):
         """Fetch global-market inputs and evaluate the buy-suppression regime.
 
@@ -789,6 +819,7 @@ class Monitor:
         self.alerts = []
         self._refresh_sentiment()
         self._refresh_earnings()
+        self._refresh_rates()
         self._check_corporate_actions()
         # Ichimoku Senkou_B is rolling(52).max().shift(26) — needs 78 non-NaN
         # bars before the latest. days=60 (~40 trading days) leaves Senkou_A/B

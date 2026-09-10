@@ -82,6 +82,25 @@ TICKER_TO_SECTOR: dict[str, str] = {
 }
 
 
+# Direction a rising JGB 10y yield pushes each sector, used by the strategy's
+# `rates` scorer. Only sectors whose sign held across every sub-period since
+# 2000 are listed (see docs/INTEREST_RATES.md): banks earn more on a steeper
+# curve, real estate is a levered bond proxy. Utilities / telecom / insurers
+# were tested and flipped sign between periods, so they are deliberately absent.
+RATE_SENSITIVITY: dict[str, float] = {
+    "megabanks": 1.0,
+    "real_estate": -1.0,
+}
+
+
+def get_rate_sensitivity(ticker: str) -> tuple[str, float]:
+    """Return (sector_id, sensitivity) for a ticker, or ("", 0.0) if none."""
+    sector = TICKER_TO_SECTOR.get(ticker)
+    if not sector:
+        return "", 0.0
+    return sector, RATE_SENSITIVITY.get(sector, 0.0)
+
+
 def get_peers(ticker: str) -> list[str]:
     """Return peer tickers in the same sector as `ticker` (excluding itself).
 

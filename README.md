@@ -220,6 +220,7 @@ The system combines 11 indicators into a weighted composite score. Each indicato
 | 12 | Earnings Surprise | Close-to-close gap around most recent earnings (14-day decay) | 2.0 |
 | 13 | Sector Spillover | Anticipates own earnings from peer reports in the same sector group | 1.5 |
 | 14 | Accumulation | Multi-day volume vs price divergence (institutional accumulation/distribution) | 1.5 |
+| 15 | Interest-rate tilt | JGB 10y up ≥15bp/20d → banks +, real estate − (see [docs/INTEREST_RATES.md](docs/INTEREST_RATES.md)) | 0 (off; 1.5 on paper) |
 
 Default weights are based on ML feature importance analysis. Higher weight = more influence on the final score.
 
@@ -242,7 +243,8 @@ Edit `indicator_weights` in `config/default.json` to tune. Set a weight to `0` t
   "sentiment": 2.5,
   "earnings": 2.0,
   "sector_spillover": 1.5,
-  "accumulation": 1.5
+  "accumulation": 1.5,
+  "rates": 1.5
 }
 ```
 
@@ -253,6 +255,16 @@ python scripts/optimize_weights.py -c config/default.json -n 100 -d 365 -t 7203.
 ```
 
 Holds `sentiment`, `relative_strength`, `ml` fixed; randomizes the technical-indicator weights; prints the top-N by risk-adjusted return and writes the best set to `{config}.best_weights.json`.
+
+### Interest Rates
+
+The bot fetches JGB 2y/10y yields (Ministry of Finance CSV) and the US 10y (`^TNX`)
+once a day. They appear in the `report` Market panel and the monthly notification, and
+feed the `rates` scorer: when the JGB 10y has risen at least `rates_tilt_rise_bp`
+(default 15bp) over 20 sessions, megabanks get a tailwind and real-estate names a
+headwind. There is deliberately **no** index-level rate gate — since 2000 the sign of
+"rates up → Nikkei down" flipped between sub-periods, so a gate would just be noise.
+Evidence and the rejected variants are in [docs/INTEREST_RATES.md](docs/INTEREST_RATES.md).
 
 ### ML Model (auto-retrains weekly)
 

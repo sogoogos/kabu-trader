@@ -82,6 +82,11 @@ class SwingCompositeStrategy:
         # Detects institutional accumulation/distribution from multi-day volume
         # vs price-action divergence. Modifier-style — low weight.
         "accumulation": 1.5,
+        # Interest-rate sector tilt (JGB 10y 20d rise -> banks up, real estate
+        # down). Off by default: the effect is real but small (~+1% 5d excess
+        # for banks since 2000), and it must be forward-validated on paper
+        # before live picks it up. Enable via indicator_weights (1.5 suggested).
+        "rates": 0.0,
     }
 
     def __init__(self, params: dict, benchmark_name: str = "Nikkei"):
@@ -91,6 +96,7 @@ class SwingCompositeStrategy:
         self.ml_model = None
         self.sentiment_data: dict = {}  # ticker -> sentiment result
         self.earnings_data: dict = {}  # ticker -> earnings-gap dict
+        self.rates_data: dict = {}  # jgb2y/jgb10y/us10y -> {level, chg_20d_bp, ...}
 
         # Market-regime overlay: when the broad market is risk-off (US sold off
         # overnight, VIX elevated, or the domestic index below its MA) new long
@@ -177,6 +183,10 @@ class SwingCompositeStrategy:
     def set_earnings_data(self, earnings_data: dict):
         """Set earnings-day price-gap data. Dict of ticker -> {days_ago, gap_pct, date}."""
         self.earnings_data = earnings_data or {}
+
+    def set_rates_data(self, rates_data: dict):
+        """Set interest-rate inputs from RatesTracker.refresh() (market-wide)."""
+        self.rates_data = rates_data or {}
 
     def analyze(self, df: pd.DataFrame, ticker: str = "") -> List[TradeSignal]:
         """Analyze a DataFrame and generate signals for each row.
@@ -340,6 +350,7 @@ class SwingCompositeStrategy:
             ("earnings", self._score_earnings_surprise, (ticker,)),
             ("sector_spillover", self._score_sector_spillover, (ticker,)),
             ("accumulation", self._score_accumulation, (df, i)),
+            ("rates", self._score_rates, (ticker,)),
         ]
 
         for name, scorer, args in scorers:
@@ -707,6 +718,32 @@ class SwingCompositeStrategy:
 
         direction = "beat" if gap_pct > 0 else "miss"
         return score, f"Earnings {direction} ({gap_pct:+.1f}% gap, {days_ago}d ago)"
+
+    def _score_rates(self, ticker: str) -> Tuple[float, str]:
+        """Sector tilt from the JGB 10-year yield trend.
+
+        Fires only when the 10y has risen at least `rates_tilt_rise_bp`
+        (default 15bp) over the last 20 sessions, and only for sectors in
+        RATE_SENSITIVITY: +raw for banks, -raw for real estate. Magnitude
+        scales linearly from 0.5 at the threshold to 1.0 at twice it. Falling
+        rates are deliberately NOT scored — since 2000 the bank/real-estate
+        response to falling yields flipped sign between periods, while the
+        rising-rate response held. Index-level rate gates were tested and
+        rejected for the same reason (docs/INTEREST_RATES.md).
+        """
+        from .sector_groups import get_rate_sensitivity
+        sector, sens = get_rate_sensitivity(ticker)
+        if not sens or not self.rates_data:
+            return 0, ""
+        jgb = self.rates_data.get("jgb10y") or {}
+        chg = jgb.get("chg_20d_bp")
+        rise_bp = self.params.get("rates_tilt_rise_bp", 15)
+        if chg is None or not rise_bp or chg < rise_bp:
+            return 0, ""
+        magnitude = min(1.0, chg / (2.0 * rise_bp))
+        raw = sens * magnitude
+        label = "tailwind" if raw > 0 else "headwind"
+        return raw, f"JGB10y {chg:+.0f}bp/20d rate {label} ({sector})"
 
     def _score_sector_spillover(self, ticker: str) -> Tuple[float, str]:
         """Anticipate this stock's earnings from recent peer reports in the same sector.
