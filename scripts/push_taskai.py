@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import multiprocessing as mp
 import os
 import sys
@@ -44,7 +45,13 @@ def _price_worker(benchmark_ticker: str, tickers, q) -> None:
         from kabu_trader.data_fetcher import DataFetcher
 
         fetcher = DataFetcher(benchmark_ticker=benchmark_ticker)
-        out = {p["ticker"]: p["price"] for p in fetcher.fetch_current_prices(list(tickers))}
+        # Drop non-finite prices: json.dumps would emit a bare NaN token, which
+        # the ingest endpoint rejects as invalid JSON (HTTP 400).
+        out = {
+            p["ticker"]: p["price"]
+            for p in fetcher.fetch_current_prices(list(tickers))
+            if math.isfinite(p["price"])
+        }
         q.put(out)
     except Exception as e:  # noqa: BLE001 - best effort
         print(f"price fetch failed: {e}", file=sys.stderr)
