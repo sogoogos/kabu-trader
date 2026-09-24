@@ -122,9 +122,11 @@ class DataFetcher:
         """
         df = self._cache.get(ticker)
         if df is None or len(df) < 2:
-            # Fallback: fetch a few days of history for this one ticker.
+            # Fallback: fetch a couple of weeks for this one ticker. The window is
+            # calendar days and we need 2 bars, so it must span the longest
+            # exchange closure (JP Golden Week / Silver Week / New Year ~5-6 days).
             try:
-                df = self.fetch_historical(ticker, days=5)
+                df = self.fetch_historical(ticker, days=14)
             except Exception as e:
                 raise RuntimeError(f"No cached data for {ticker}: {e}")
         if len(df) < 2:
