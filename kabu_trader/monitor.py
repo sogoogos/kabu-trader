@@ -1013,6 +1013,7 @@ class Monitor:
             return
 
         now_str = datetime.now(self.tz).strftime("%Y-%m-%d %H:%M:%S")
+        sym = self.currency_symbol
 
         # Build price dict
         price_dict = {p["ticker"]: p["price"] for p in prices if p.get("price")}

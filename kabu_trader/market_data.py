@@ -30,8 +30,13 @@ _OHLCV = ["Open", "High", "Low", "Close", "Volume"]
 
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep OHLCV columns and strip timezone for cross-provider consistency."""
-    df = df[_OHLCV].copy()
+    """Keep OHLCV columns and strip timezone for cross-provider consistency.
+
+    Drops bars with no Close: off-hours yfinance can return the current session
+    as a placeholder row with NaN OHLC but a real Volume, which survives
+    dropna(how="all") and would surface as a NaN "current price".
+    """
+    df = df[_OHLCV].dropna(subset=["Close"]).copy()
     df.index = pd.to_datetime(df.index)
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
