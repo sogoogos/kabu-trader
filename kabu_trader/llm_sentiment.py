@@ -159,7 +159,7 @@ class LLMSentimentAnalyzer:
                 return cached
 
         # Fetch news
-        news = fetch_stock_news(ticker, max_items=8)
+        news = fetch_stock_news(ticker, max_items=8, company_name=company_name)
         if not news:
             return {"score": 0, "confidence": 0.1, "reasoning": "No recent news available",
                     "key_factors": [], "_timestamp": time.time()}
@@ -327,8 +327,9 @@ class LLMSentimentAnalyzer:
             chunk = pending[i : i + batch_size]
             ticker_news: Dict[str, tuple] = {}
             for ticker in chunk:
-                news = fetch_stock_news(ticker, max_items=5)
-                ticker_news[ticker] = (names.get(ticker, ""), news or [])
+                company = names.get(ticker, "")
+                news = fetch_stock_news(ticker, max_items=5, company_name=company)
+                ticker_news[ticker] = (company, news or [])
             batch_result = self.analyze_batch(ticker_news)
             results.update(batch_result)
 
