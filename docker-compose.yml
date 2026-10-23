@@ -2,6 +2,9 @@ services:
   kabu-trader-jp:
     build: .
     container_name: kabu-trader-jp
+    # Paper trading was retired on 2026-10-23 to save LLM/API spend.
+    # Opt back in with: docker compose --profile paper up -d kabu-trader-jp
+    profiles: ["paper"]
     restart: unless-stopped
     network_mode: host
     command: ["-c", "/app/config/default.json", "monitor", "--paper"]
@@ -50,6 +53,9 @@ services:
   kabu-trader-us:
     build: .
     container_name: kabu-trader-us
+    # Paper trading was retired on 2026-10-23 to save LLM/API spend.
+    # Opt back in with: docker compose --profile paper up -d kabu-trader-us
+    profiles: ["paper"]
     restart: unless-stopped
     command: ["-c", "/app/config/us.json", "monitor", "--paper"]
     volumes:

@@ -37,12 +37,13 @@ pip install yfinance pandas numpy rich scikit-learn openai
 cp config/default.example.json config/default.json
 # (config/us.json ships pre-filled — tune the watchlist/capital if you want)
 
-# Build and start both markets (JP + US paper trading)
+# Build and start the live JP trader (paper services are behind the "paper"
+# profile since 2026-10-23 and are not started by a plain `up`)
 docker compose up -d
 
-# Or start only one
-docker compose up -d kabu-trader-jp
-docker compose up -d kabu-trader-us
+# Paper trading (JP + US), opt-in
+docker compose --profile paper up -d kabu-trader-jp
+docker compose --profile paper up -d kabu-trader-us
 
 # Check logs
 docker compose logs -f kabu-trader-jp
