@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TaskAI への取引状況プッシュを cron に登録する（平日30分ごと・3市場）。
+# TaskAI への取引状況プッシュを cron に登録する（平日30分ごと・既定はライブのみ）。
 #
 # 使い方（URL/トークンは環境変数から。リポジトリは公開なので値はコミットしない）:
 #   export TASKAI_INGEST_URL=https://<your-taskai-domain>/api/trading/ingest
@@ -22,9 +22,13 @@ job() {  # container config source label
   crontab -l 2>/dev/null | grep -vE 'push_taskai|TASKAI_INGEST_' || true
   echo "TASKAI_INGEST_URL=${TASKAI_INGEST_URL}"
   echo "TASKAI_INGEST_TOKEN=${TASKAI_INGEST_TOKEN}"
-  job kabu-trader-jp      config/default.json jp   "日本株(ペーパー)"
   job kabu-trader-jp-live config/live.json    live "日本株(ライブ)"
-  job kabu-trader-us      config/us.json      us   "米国株"
+  # Paper containers are behind the "paper" compose profile (retired 2026-10-23).
+  # Set TASKAI_INCLUDE_PAPER=1 to push them too when they are running.
+  if [ "${TASKAI_INCLUDE_PAPER:-0}" = "1" ]; then
+    job kabu-trader-jp    config/default.json jp   "日本株(ペーパー)"
+    job kabu-trader-us    config/us.json      us   "米国株"
+  fi
 } | crontab -
 
 echo "installed. 登録内容:"
