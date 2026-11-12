@@ -309,6 +309,8 @@ Or use environment variable: `export OPENAI_API_KEY="sk-..."`
 | `stop_loss_pct` | 0.05 | -5% hard stop loss |
 | `take_profit_pct` | 0.15 | +15% take profit |
 | `commission_rate` | 0.001 | 0.1% commission per trade |
+| `commission_min` | 0 | Per-order commission floor (IBKR Japan: 88 = ¥80 + tax, with rate 0.00088) |
+| `dividend_tax_rate` | 0 | Withholding on dividends credited at ex-date (JP: 0.20315) |
 | `trailing_stop_enabled` | `true` | Once a position is up `activate_pct`, exit if price falls `distance_pct` below the high |
 | `trailing_stop_activate_pct` | 0.05 | Trailing stop arms after +5% gain |
 | `trailing_stop_distance_pct` | 0.03 | Exits if price drops 3% below the high-water mark |

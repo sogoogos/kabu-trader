@@ -82,12 +82,22 @@ class CorporateActionsTracker:
 
 
 def _events_after(series: pd.Series, since_dt: datetime, value_key: str) -> list:
+    """Events dated strictly after since_dt's calendar day.
+
+    Compared by DATE, not datetime: yfinance stamps JP events at 09:00 local
+    while the applied-watermark (Position.last_adjusted_at) is stored as a bare
+    date (= 00:00), so a datetime compare re-matched every already-applied
+    event on every daily check — 2026-09-29 dividends were credited up to 4x.
+    Date granularity is also the right semantics for entry: a position bought
+    ON the ex/split date is not entitled to that dividend and already trades
+    on post-split prices.
+    """
     if series is None or len(series) == 0:
         return []
     out = []
     for ts, value in series.items():
         d = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
         d_naive = d.replace(tzinfo=None) if hasattr(d, "tzinfo") and d.tzinfo else d
-        if d_naive > since_dt:
+        if d_naive.date() > since_dt.date():
             out.append({"date": d_naive.strftime("%Y-%m-%d"), value_key: float(value)})
     return out

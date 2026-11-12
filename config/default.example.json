@@ -923,7 +923,9 @@
   "backtest": {
     "initial_capital": 1000000,
     "monthly_target_pct": 0.05,
-    "commission_rate": 0.0005,
+    "commission_rate": 0.00088,
+    "commission_min": 88,
+    "dividend_tax_rate": 0.20315,
     "position_size_pct": 0.1,
     "max_positions": 5,
     "stop_loss_pct": 0.05,
