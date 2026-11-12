@@ -113,6 +113,15 @@ class PaperTrader:
         self._notify_cb = notify
         self.initial_capital = config.get("initial_capital", 1000000)
         self.commission_rate = config.get("commission_rate", 0.001)
+        # Per-order commission floor (account currency). IBKR Japan charges
+        # 0.08% with a ¥80 minimum, plus 10% consumption tax → rate 0.00088,
+        # min 88. Checked against broker cash flows: within ~¥2/order, where
+        # the old flat 0.05% under-booked by ~45%.
+        self.commission_min = config.get("commission_min", 0.0)
+        # Withholding on dividends credited at the ex-date. JP residents pay
+        # 20.315% on JP dividends and IBKR accrues the net amount, so
+        # crediting gross overstated cash.
+        self.dividend_tax_rate = config.get("dividend_tax_rate", 0.0)
         self.position_size_pct = config.get("position_size_pct", 0.1)
         self.max_positions = config.get("max_positions", 5)
         self.stop_loss_pct = config.get("stop_loss_pct", 0.05)
@@ -480,6 +489,12 @@ class PaperTrader:
 
         return actions
 
+    def _commission(self, value: float) -> float:
+        """Commission for one order of `value` (rate with a per-order floor)."""
+        if value <= 0:
+            return 0.0
+        return max(value * self.commission_rate, self.commission_min)
+
     def _buy(self, ticker: str, name: str, price: float, score: int,
              reasons: List[str], timestamp: str,
              atr: Optional[float] = None) -> Optional[dict]:
@@ -512,7 +527,7 @@ class PaperTrader:
         lot = self.shares_per_lot
         shares = max(lot, int(position_value / price / lot) * lot)
         cost = price * shares
-        commission = cost * self.commission_rate
+        commission = self._commission(cost)
 
         if cost + commission > self.cash:
             return None
@@ -539,7 +554,7 @@ class PaperTrader:
                       f"{self.live_buy_price_buffer_pct:.0%} price buffer")
                 shares = affordable
                 cost = price * shares
-                commission = cost * self.commission_rate
+                commission = self._commission(cost)
 
         # Live order routing — submit before mutating local state. If the
         # broker rejects, we abort the local update so paper state stays
@@ -564,8 +579,15 @@ class PaperTrader:
             # polling deadline (rare for MKT on liquid names) — log clearly
             # so reconcile picks up the drift.
             raw_fill_shares = int(order_result.get("filled_shares", 0))
-            raw_fill_price = float(order_result.get("avg_fill_price", 0))
+            raw_fill_price = float(order_result.get("avg_fill_price", 0) or 0)
             status = order_result.get("status", "")
+            if raw_fill_shares > 0 and raw_fill_price <= 0:
+                # Quantity known but no price (e.g. a Filled status whose
+                # reply lacked average_price): never book a ¥0 entry — that
+                # would zero the stop/trailing math. Fall back to the signal.
+                print(f"Live BUY {ticker}: fill price missing (status={status}); "
+                      f"recording signal price ¥{price:,.2f} — reconcile will reveal drift")
+                raw_fill_price = price
             if raw_fill_shares == 0:
                 print(f"Live BUY {ticker}: NO fill within deadline (status={status}); "
                       f"recording {shares}@¥{price:,.2f} from signal — broker may still "
@@ -582,7 +604,7 @@ class PaperTrader:
                 fill_shares, fill_price = raw_fill_shares, raw_fill_price
             shares = fill_shares
             cost = fill_price * fill_shares
-            commission = cost * self.commission_rate
+            commission = self._commission(cost)
             price = fill_price
             # Re-validate against cash after the fill — slippage above the
             # signal price can push the actual cost above the pre-check
@@ -659,7 +681,7 @@ class PaperTrader:
                 price = fill_price
 
         proceeds = price * pos.shares
-        commission = proceeds * self.commission_rate
+        commission = self._commission(proceeds)
         self.cash += proceeds - commission
 
         pnl = pos.pnl(price)
@@ -726,9 +748,15 @@ class PaperTrader:
                 amount = float(div["amount"])
                 if amount <= 0:
                     continue
-                proceeds = amount * pos.shares
+                gross = amount * pos.shares
+                proceeds = gross * (1 - self.dividend_tax_rate)
                 self.cash += proceeds
+                # Entry drops by the GROSS amount: that's what the ex-date
+                # price gap is, and the stop/trailing math compares prices.
                 pos.entry_price = max(0.01, pos.entry_price - amount)
+                reason = f"dividend {amount:.4f}/share × {pos.shares} = {gross:.2f}"
+                if self.dividend_tax_rate:
+                    reason += f" (net {proceeds:.2f} after {self.dividend_tax_rate:.3%} tax)"
                 entry = {
                     "action": "DIVIDEND",
                     "ticker": ticker,
@@ -736,7 +764,7 @@ class PaperTrader:
                     "price": amount,
                     "shares": pos.shares,
                     "proceeds": proceeds,
-                    "reason": f"dividend {amount:.4f}/share × {pos.shares} = {proceeds:.2f}",
+                    "reason": reason,
                     "timestamp": div["date"] + " 00:00:00",
                 }
                 self.trade_log.append(entry)

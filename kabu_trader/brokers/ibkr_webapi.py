@@ -44,6 +44,22 @@ _FLD_CLOSE = "7296"  # prior close  # VERIFY
 _TERMINAL_STATUSES = {"Filled", "Cancelled", "ApiCancelled", "Inactive", "Rejected"}
 
 
+def _parse_fill(sd: dict) -> tuple[int, float]:
+    """(filled shares, average fill price) from an order_status reply.
+
+    /iserver/account/order/status/{id} reports the filled quantity as
+    `cum_fill` (snake_case, a string like "100.0"). The camelCase spellings
+    belong to other endpoints (/iserver/account/orders) and are kept only as
+    fallbacks — reading just those left every live BUY at filled=0.
+    """
+    sd = sd or {}
+    filled = int(float(sd.get("cum_fill") or sd.get("filled_quantity")
+                       or sd.get("cumFill") or sd.get("filledQuantity") or 0) or 0)
+    avg_price = float(sd.get("average_price") or sd.get("avgPrice")
+                      or sd.get("avg_price") or 0) or 0.0
+    return filled, avg_price
+
+
 class IBKRWebAPIBroker:
     """Web API (OAuth) broker adapter, interface-compatible with IBKRBroker."""
 
@@ -342,11 +358,15 @@ class IBKRWebAPIBroker:
             )
 
             # Poll for a terminal status (~10s), like the TWS-API adapter.
+            # Always query order_status at least once: the place_order reply
+            # carries no fill fields, so breaking on a terminal status there
+            # would report 0 filled at price 0.
             status = (first or {}).get("order_status") or (first or {}).get("status") or ""
             filled = 0
             avg_price = 0.0
+            polled = False
             for _ in range(20):  # 20 x 0.5s = 10s
-                if status in _TERMINAL_STATUSES:
+                if polled and status in _TERMINAL_STATUSES:
                     break
                 time.sleep(0.5)
                 try:
@@ -354,11 +374,15 @@ class IBKRWebAPIBroker:
                     sd = st.data if hasattr(st, "data") else st
                 except Exception:
                     continue
+                polled = True
                 status = sd.get("order_status") or sd.get("status") or status
-                filled = int(float(sd.get("filled_quantity") or sd.get("cumFill")
-                                   or sd.get("filledQuantity") or 0) or 0)
-                avg_price = float(sd.get("average_price") or sd.get("avgPrice")
-                                  or sd.get("avg_price") or 0) or 0.0
+                filled, avg_price = _parse_fill(sd)
+
+        # A Filled order is fully filled by definition; if the reply still
+        # lacks a parseable quantity, trust the status rather than reporting
+        # 0 (which made the ledger record signal-time prices for every BUY).
+        if status == "Filled" and filled == 0:
+            filled = int(shares)
 
         return {
             "order_id": order_id,

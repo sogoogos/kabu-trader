@@ -34,12 +34,21 @@ python3 -c "import json; p='config/default.json'; c=json.load(open(p)); c['backt
 
 ## Commission
 
-IBKR Japan uses a **tiered commission**: roughly **0.05% of trade value** with a **¥80 minimum** per execution. For typical ¥300K–500K positions, the percentage rate dominates and `0.0005` is a good approximation. Tiny positions (< ¥160K) hit the floor and the effective rate climbs.
+IBKR Japan (fixed pricing) charges **0.08% of trade value, ¥80 minimum per order, plus 10% consumption tax**. Model it as:
 
-The local P&L will still diverge slightly from the broker P&L because of:
-- Slippage between signal price and fill price (cents-to-yen)
-- Tier-minimum effects on small trades
-- Tax-related fees (paper accounts skip these)
+```json
+"commission_rate": 0.00088,
+"commission_min": 88,
+"dividend_tax_rate": 0.20315
+```
+
+Checked against live broker cash flows (Jul–Oct 2026): this model lands within ~¥2 per order, while the earlier flat `0.0005` under-booked commissions by ~45% and let local cash drift above the broker. Orders under ~¥100K hit the ¥88 floor.
+
+`dividend_tax_rate` is the withholding on JP dividends (20.315%). Dividends are credited net at the ex-date, matching IBKR's accrued-dividend line (they settle to cash ~2–3 months later, so compare local cash against IBKR **NetLiquidation** when flat, not TotalCashValue).
+
+The local P&L can still diverge slightly from the broker P&L because of:
+- Per-order yen rounding of commission/tax (~¥2/order)
+- Fills the adapter couldn't price (logged as "fill price missing")
 
 Trust IBKR's view as the source of truth; use local for strategy tuning.
 
